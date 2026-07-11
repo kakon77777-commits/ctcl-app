@@ -1,0 +1,16 @@
+[package]
+name = "ctcl-store"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SQLite-backed persistence for CTCL Temporal Port: instants, custom systems, temporal groups. The local, offline equivalent of the hosted Worker's CTCL_KV registry."
+
+[dependencies]
+ctcl-core = { path = "../ctcl-core" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

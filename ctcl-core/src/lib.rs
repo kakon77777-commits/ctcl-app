@@ -16,3 +16,4 @@ pub use encoding::{from_ns, rfc3339, to_ns};
 pub use error::CtclError;
 pub use instant::{instant_view, now_ns, now_view, Encodings, InstantView, Timescales};
 pub use system::{LocalTimeExtra, Pause, Rate, Segment, TablePoint, TemporalSystem};
+pub use timescale::{gps_approx_ns, tai_approx_ns};
