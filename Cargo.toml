@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["ctcl-core", "ctcl-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Neo.K / EveMissLab"]
+license = "Apache-2.0"
+repository = "https://github.com/kakon77777-commits/ctcl-app"

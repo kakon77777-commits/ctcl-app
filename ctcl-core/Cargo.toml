@@ -1,0 +1,13 @@
+[package]
+name = "ctcl-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CTCL core: reference instant + heterogeneous time transformation. Shared by the CLI and the desktop app — same logic, one crate."
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }

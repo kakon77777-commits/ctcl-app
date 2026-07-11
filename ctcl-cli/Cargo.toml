@@ -1,0 +1,16 @@
+[package]
+name = "ctcl-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CTCL Temporal Port CLI - the Phase 0 command-line surface over ctcl-core"
+
+[[bin]]
+name = "ctcl"
+path = "src/main.rs"
+
+[dependencies]
+ctcl-core = { path = "../ctcl-core" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
