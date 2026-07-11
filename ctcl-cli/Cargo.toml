@@ -14,3 +14,4 @@ path = "src/main.rs"
 ctcl-core = { path = "../ctcl-core" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+tiny_http = "0.12"

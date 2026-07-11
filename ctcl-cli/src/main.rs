@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
 use ctcl_core::{from_ns, now_view, to_ns};
 use serde_json::json;
 
+mod server;
+
 #[derive(Parser)]
 #[command(name = "ctcl", version, about = "CTCL Temporal Port - local reference instant + time transformation")]
 struct Cli {
@@ -32,6 +34,11 @@ enum Commands {
         /// Output IANA timezone (only affects rfc3339 output), e.g. Asia/Taipei
         #[arg(long)]
         tz: Option<String>,
+    },
+    /// Run a local-only web preview at http://127.0.0.1:<port>/ (no terminal needed after this)
+    Serve {
+        #[arg(long, default_value_t = 4179)]
+        port: u16,
     },
 }
 
@@ -70,6 +77,7 @@ fn main() {
             },
             Err(e) => print_error(&e.code().to_string(), &e.to_string()),
         },
+        Commands::Serve { port } => server::serve(port),
     }
 }
 
