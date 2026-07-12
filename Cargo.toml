@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ctcl-core", "ctcl-store", "ctcl-cli"]
+members = ["ctcl-core", "ctcl-store", "ctcl-cli", "ctcl-desktop"]
 
 [workspace.package]
 version = "0.1.0"

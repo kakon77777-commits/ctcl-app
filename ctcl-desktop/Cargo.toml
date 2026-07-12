@@ -1,0 +1,17 @@
+[package]
+name = "ctcl-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CTCL Temporal Port - Phase 1 desktop shell (Tauri). Same ctcl-core/ctcl-store as the CLI, a real double-click window instead of a terminal."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ctcl-core = { path = "../ctcl-core" }
+ctcl-store = { path = "../ctcl-store" }

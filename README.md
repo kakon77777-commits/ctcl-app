@@ -1,4 +1,4 @@
-# CTCL Temporal Port — desktop app (Phase 0 complete)
+# CTCL Temporal Port — desktop app (Phase 1: real window, Neo-verified)
 
 The local, installable counterpart to [CTCL](https://commoninstant.org) (Common
 Temporal Coordinate Layer). Per the
@@ -38,6 +38,9 @@ desktop-first, not a rewrite of the hosted API.
   bad system id doesn't fail the whole request), different storage engine.
 - `ctcl-cli/` — the CLI: `now`, `convert`, `serve` (a local no-terminal web
   preview), and `instant`/`system`/`group` subcommands over `ctcl-store`.
+- `ctcl-desktop/` — the **real Phase 1 desktop shell** (Tauri 2). Same
+  `ctcl-core`/`ctcl-store` as the CLI, called through Tauri's IPC instead of
+  HTTP. A genuine double-click-able window, not a browser preview.
 
 ## Develop
 
@@ -55,6 +58,12 @@ cargo run --bin ctcl -- group expand group:demo
 
 Or just double-click `Open-CTCL-Preview.bat` — no terminal needed at all.
 
+For the real desktop app:
+
+```bash
+cargo tauri dev --manifest-path ctcl-desktop/Cargo.toml
+```
+
 ## Status
 
 **Phase 0 (Shared Core) complete**: core time math, SQLite persistence
@@ -62,10 +71,16 @@ Or just double-click `Open-CTCL-Preview.bat` — no terminal needed at all.
 all done and tested (23 unit tests + full manual CLI smoke test of every
 subcommand, including real cross-process persistence and every error path).
 
-Still to come, per the whitepaper's own roadmap: a Tauri desktop shell
-(Phase 1 — reusing the same `ctcl-core`/`ctcl-store` and likely the existing
-preview HTML as its webview content), the local API + capability-scoped
-permission model (Phase 2), device clock observation (Phase 3).
+**Phase 1 (Desktop MVP) started and Neo-verified 2026-07-12**: a real Tauri
+window (title "CTCL Temporal Port") reusing the Phase 0 preview's UI, wired to
+`ctcl-core` through Tauri commands instead of HTTP. This is the one thing that
+genuinely needed a human's eyes rather than automated testing — Neo confirmed
+the live clock and the convert flow (Taipei → Tokyo, Taipei → UTC) both
+produce correct results in the actual running window. Still to come: the
+Dashboard's Systems/Groups sections (backend commands already wired -
+`list_systems`/`list_groups`/`expand_group` - just no UI yet), the local API +
+capability-scoped permission model (Phase 2), device clock observation
+(Phase 3).
 
 This is intentionally **not** trying to replicate CTCL Web's whole surface at
 once — it starts from the same core math and grows outward, same as the Worker

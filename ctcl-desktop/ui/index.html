@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTCL Temporal Port</title>
+<style>
+:root{
+  --bg:#f4eddc; --surf:#fbf6ea; --surf2:#f4ecd9; --ink:#241d11; --dim:#5e5540; --faint:#897b60;
+  --gold:#8c6c1c; --gold2:#a9862a; --line:#e3d7bd; --line2:#d4c5a3;
+  --serif:Georgia,'Times New Roman',serif; --sans:ui-sans-serif,system-ui,'Segoe UI',Roboto,sans-serif;
+  --mono:ui-monospace,'SF Mono',Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#14100a; --surf:#1e190f; --surf2:#26200f; --ink:#ece3d0; --dim:#b6ab90; --faint:#7d7259; --gold:#cda24f; --gold2:#e7c884; --line:#2c2515; --line2:#3a3220; }
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.6 var(--sans);padding:2rem 1.4rem 3rem;-webkit-user-select:none;user-select:none}
+.wrap{max-width:560px;margin:0 auto}
+.eyebrow{font:600 .7rem/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin-bottom:.5rem}
+h1{font-family:var(--serif);font-size:1.7rem;font-weight:700;margin-bottom:.3rem}
+.lede{color:var(--dim);margin-bottom:1.6rem;max-width:46ch;font-size:.92rem}
+.card{border:1px solid var(--line);border-radius:1rem;background:var(--surf);padding:1.5rem 1.6rem;margin-bottom:1.2rem}
+.card h2{font-family:var(--serif);font-size:1.05rem;margin-bottom:1rem;color:var(--dim)}
+.big-time{font-family:var(--serif);font-size:1.75rem;font-weight:700;text-align:center;margin:.4rem 0 .3rem;color:var(--gold);-webkit-user-select:text;user-select:text}
+.big-sub{text-align:center;color:var(--faint);font-size:.85rem}
+.mono-small{font-family:var(--mono);font-size:.7rem;color:var(--faint);text-align:center;margin-top:.6rem;word-break:break-all;-webkit-user-select:text;user-select:text}
+label{display:block;font-size:.85rem;color:var(--dim);margin:.9rem 0 .35rem}
+input[type=datetime-local], select{
+  width:100%;font:inherit;font-size:1rem;background:var(--surf2);border:1px solid var(--line2);color:var(--ink);
+  border-radius:.6rem;padding:.65rem .75rem;
+}
+button{
+  margin-top:1.1rem;width:100%;font:600 1rem/1 var(--sans);background:var(--gold);color:#fff;border:0;
+  border-radius:.6rem;padding:.85rem;cursor:pointer;transition:background .15s;
+}
+@media (prefers-color-scheme: dark){ button{ color:#1a1408 } }
+button:hover{background:var(--gold2)}
+.result{margin-top:1.1rem;border-top:1px solid var(--line);padding-top:1.1rem;text-align:center;display:none}
+.result.show{display:block}
+.result .out{font-family:var(--serif);font-size:1.3rem;font-weight:700;color:var(--gold);-webkit-user-select:text;user-select:text}
+.result .out-sub{color:var(--faint);font-size:.85rem;margin-top:.3rem}
+.err{color:#b0413e;text-align:center;margin-top:1rem;font-size:.9rem}
+footer{color:var(--faint);font-size:.76rem;text-align:center;margin-top:1.6rem;line-height:1.7}
+.badge{display:inline-block;font:600 .65rem/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  background:var(--surf2);border:1px solid var(--line2);color:var(--faint);border-radius:99px;padding:.25rem .6rem;margin-bottom:1rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="badge">桌面版 · Phase 1</div>
+  <div class="eyebrow">CTCL Temporal Port</div>
+  <h1>你的電腦，現在的這一刻</h1>
+  <p class="lede">這是真正的桌面程式——不是網頁，是雙擊就能打開的視窗。跟你之前看過的預覽版邏輯完全一樣，只是現在住在自己的視窗裡了。</p>
+
+  <div class="card">
+    <h2>現在</h2>
+    <div class="big-time" id="nowBig">讀取中…</div>
+    <div class="big-sub" id="nowSub">&nbsp;</div>
+    <div class="mono-small" id="nowRaw">&nbsp;</div>
+  </div>
+
+  <div class="card">
+    <h2>換算時間</h2>
+    <label for="dt">選一個時間</label>
+    <input type="datetime-local" id="dt">
+    <label for="city">換算成這個地方的時間</label>
+    <select id="city">
+      <option value="Asia/Taipei">台北</option>
+      <option value="Asia/Tokyo">東京</option>
+      <option value="America/New_York">紐約</option>
+      <option value="Europe/London">倫敦</option>
+      <option value="UTC">世界標準時間（UTC）</option>
+    </select>
+    <button id="go">換算 →</button>
+    <div class="result" id="result">
+      <div class="out" id="resultOut">…</div>
+      <div class="out-sub" id="resultSub">&nbsp;</div>
+    </div>
+    <div class="err" id="err"></div>
+  </div>
+
+  <footer>
+    這個視窗只在你自己的電腦上運作，不會把任何資料傳到網路上。<br>
+    想看網路上正式版的 CTCL，可以到 commoninstant.org。
+  </footer>
+</div>
+
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const CITY_NAMES = {
+  "Asia/Taipei": "台北", "Asia/Tokyo": "東京", "America/New_York": "紐約",
+  "Europe/London": "倫敦", "UTC": "世界標準時間",
+};
+const WEEKDAYS = ["日","一","二","三","四","五","六"];
+
+// The target string already carries its own timezone offset (e.g. +08:00 for
+// Taipei) - read its calendar digits LITERALLY, do not re-interpret through
+// the OS's own local zone, or a converted result would silently get converted
+// a second time. (Same lesson learned building the Phase 0 web preview.)
+function friendlyFromIso(iso) {
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return iso;
+  const [, y, mo, d, h, mi] = m;
+  const dow = new Date(Date.UTC(+y, +mo - 1, +d)).getUTCDay();
+  const hNum = +h;
+  const ampm = hNum < 12 ? "上午" : "下午";
+  const h12 = ((hNum + 11) % 12) + 1;
+  return `${y}年${+mo}月${+d}日（週${WEEKDAYS[dow]}）${ampm} ${h12}:${mi}`;
+}
+
+// The "now" card shows THIS machine's own local time.
+function friendlyLocal(iso) {
+  const d = new Date(iso);
+  const y = d.getFullYear(), mo = d.getMonth() + 1, day = d.getDate(), dow = d.getDay();
+  const h = d.getHours(), mi = String(d.getMinutes()).padStart(2, "0");
+  const ampm = h < 12 ? "上午" : "下午";
+  const h12 = ((h + 11) % 12) + 1;
+  return `${y}年${mo}月${day}日（週${WEEKDAYS[dow]}）${ampm} ${h12}:${mi}`;
+}
+
+async function tick() {
+  try {
+    const data = await invoke('now');
+    const iso = data.encodings.rfc3339;
+    document.getElementById('nowBig').textContent = friendlyLocal(iso);
+    document.getElementById('nowSub').textContent = '這是你這台電腦目前的時間';
+    document.getElementById('nowRaw').textContent = iso;
+  } catch (e) {
+    document.getElementById('nowBig').textContent = '讀取失敗';
+  }
+}
+tick();
+setInterval(tick, 1000);
+
+document.getElementById('go').addEventListener('click', async () => {
+  const errEl = document.getElementById('err');
+  const resEl = document.getElementById('result');
+  errEl.textContent = '';
+  resEl.classList.remove('show');
+  const dtVal = document.getElementById('dt').value;
+  if (!dtVal) { errEl.textContent = '請先選一個時間。'; return; }
+  const tz = document.getElementById('city').value;
+  const utcIso = new Date(dtVal).toISOString();
+  try {
+    const data = await invoke('convert', { value: utcIso, from: 'rfc3339', to: 'rfc3339', tz });
+    document.getElementById('resultOut').textContent = friendlyFromIso(data.output);
+    document.getElementById('resultSub').textContent = `${CITY_NAMES[tz] || tz} 的時間`;
+    resEl.classList.add('show');
+  } catch (e) {
+    errEl.textContent = String((e && e.message) || e);
+  }
+});
+</script>
+</body>
+</html>
