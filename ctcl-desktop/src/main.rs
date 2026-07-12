@@ -4,16 +4,18 @@
 // loopback HTTP server (disabled by default, per the whitepaper's §7.2).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod device_observer;
 mod local_api;
 
 use ctcl_core::{from_ns, now_view, to_ns};
-use ctcl_store::{AuditEntry, Settings, Store, ALL_SCOPES};
+use ctcl_store::{AuditEntry, DeviceEvent, Settings, Store, ALL_SCOPES};
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
 struct AppState {
     store: Arc<Mutex<Store>>,
     local_api: Mutex<Option<local_api::LocalApiHandle>>,
+    device_observer: Mutex<Option<device_observer::ObserverHandle>>,
 }
 
 #[derive(Serialize)]
@@ -59,11 +61,19 @@ struct SettingsView {
     all_scopes: &'static [&'static str],
     feature_status: Vec<ctcl_store::settings::FeatureStatus>,
     local_api_running: bool,
+    device_observer_running: bool,
 }
 
 fn settings_view(state: &tauri::State<AppState>, settings: Settings) -> SettingsView {
     let running = state.local_api.lock().unwrap().is_some();
-    SettingsView { settings, all_scopes: ALL_SCOPES, feature_status: Settings::status(), local_api_running: running }
+    let observer_running = state.device_observer.lock().unwrap().is_some();
+    SettingsView {
+        settings,
+        all_scopes: ALL_SCOPES,
+        feature_status: Settings::status(),
+        local_api_running: running,
+        device_observer_running: observer_running,
+    }
 }
 
 #[tauri::command]
@@ -79,6 +89,7 @@ fn get_settings(state: tauri::State<AppState>) -> Result<SettingsView, String> {
 fn update_settings(state: tauri::State<AppState>, settings: Settings) -> Result<SettingsView, String> {
     state.store.lock().unwrap().save_settings(&settings).map_err(|e| e.to_string())?;
     sync_local_api(&state, &settings);
+    sync_device_observer(&state, &settings);
     Ok(settings_view(&state, settings))
 }
 
@@ -94,6 +105,28 @@ fn list_audit_log(state: tauri::State<AppState>) -> Result<Vec<AuditEntry>, Stri
     state.store.lock().unwrap().list_audit_log(50).map_err(|e| e.to_string())
 }
 
+// ---- Device Clock Observer (Phase 3) ---------------------------------------
+
+#[derive(Serialize)]
+struct DeviceObserverStatus {
+    running: bool,
+    last: Option<device_observer::LastSample>,
+}
+
+#[tauri::command]
+fn device_observer_status(state: tauri::State<AppState>) -> DeviceObserverStatus {
+    let slot = state.device_observer.lock().unwrap();
+    match slot.as_ref() {
+        Some(handle) => DeviceObserverStatus { running: true, last: handle.last.lock().unwrap().clone() },
+        None => DeviceObserverStatus { running: false, last: None },
+    }
+}
+
+#[tauri::command]
+fn list_device_events(state: tauri::State<AppState>) -> Result<Vec<DeviceEvent>, String> {
+    state.store.lock().unwrap().list_device_events(50).map_err(|e| e.to_string())
+}
+
 /// Ensure the running local API (if any) matches current settings - start it
 /// if now enabled, stop it if now disabled, restart it if the port changed.
 fn sync_local_api(state: &tauri::State<AppState>, settings: &Settings) {
@@ -107,6 +140,20 @@ fn sync_local_api(state: &tauri::State<AppState>, settings: &Settings) {
     }
 }
 
+/// Same start/stop discipline as sync_local_api - "off" means no thread
+/// running at all, not a thread that quietly does nothing.
+fn sync_device_observer(state: &tauri::State<AppState>, settings: &Settings) {
+    let mut slot = state.device_observer.lock().unwrap();
+    *slot = None; // dropping the old handle (if any) stops the sampling thread
+    if settings.device_clock_observer_enabled {
+        *slot = Some(device_observer::start(
+            state.store.clone(),
+            settings.device_clock_sample_interval_s,
+            settings.device_clock_drift_threshold_s,
+        ));
+    }
+}
+
 fn main() {
     let db_path = "ctcl-desktop-data.sqlite3";
     let store = Store::open(db_path).unwrap_or_else(|e| {
@@ -115,15 +162,21 @@ fn main() {
     });
     let store = Arc::new(Mutex::new(store));
 
-    // Start the local API immediately if a previous session left it enabled -
-    // "enabled" is a persisted preference, not a per-run default.
+    // Start the local API / device observer immediately if a previous session
+    // left them enabled - "enabled" is a persisted preference, not a
+    // per-run default.
     let initial_settings = store.lock().unwrap().get_settings().ok();
     let local_api = initial_settings
+        .as_ref()
         .filter(|s| s.local_api_enabled)
         .and_then(|s| local_api::start(store.clone(), s.local_api_port).ok());
+    let observer = initial_settings
+        .as_ref()
+        .filter(|s| s.device_clock_observer_enabled)
+        .map(|s| device_observer::start(store.clone(), s.device_clock_sample_interval_s, s.device_clock_drift_threshold_s));
 
     tauri::Builder::default()
-        .manage(AppState { store, local_api: Mutex::new(local_api) })
+        .manage(AppState { store, local_api: Mutex::new(local_api), device_observer: Mutex::new(observer) })
         .invoke_handler(tauri::generate_handler![
             now,
             convert,
@@ -134,6 +187,8 @@ fn main() {
             update_settings,
             regenerate_api_token,
             list_audit_log,
+            device_observer_status,
+            list_device_events,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the CTCL Temporal Port app");

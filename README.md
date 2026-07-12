@@ -1,4 +1,4 @@
-# CTCL Temporal Port — desktop app (Phase 1: real window, Neo-verified)
+# CTCL Temporal Port — desktop app (Phase 3: device clock observer)
 
 The local, installable counterpart to [CTCL](https://commoninstant.org) (Common
 Temporal Coordinate Layer). Per the
@@ -38,15 +38,21 @@ desktop-first, not a rewrite of the hosted API.
   bad system id doesn't fail the whole request), different storage engine.
 - `ctcl-cli/` — the CLI: `now`, `convert`, `serve` (a local no-terminal web
   preview), and `instant`/`system`/`group` subcommands over `ctcl-store`.
-- `ctcl-desktop/` — the **real Phase 1 desktop shell** (Tauri 2). Same
+- `ctcl-desktop/` — the **real desktop shell** (Tauri 2). Same
   `ctcl-core`/`ctcl-store` as the CLI, called through Tauri's IPC instead of
-  HTTP. A genuine double-click-able window, not a browser preview.
+  HTTP. A genuine double-click-able window, not a browser preview. Also owns
+  two background threads that only run when explicitly enabled (both off by
+  default, whitepaper §7.2 "default off"): `local_api.rs` (Phase 2 — a
+  loopback-only HTTP gateway, bearer-token auth, capability-scope enforced,
+  every call audit-logged) and `device_observer.rs` (Phase 3 — periodically
+  samples the wall clock against a monotonic anchor and classifies drift /
+  sleep-wake / manual clock rollback; only anomalies are persisted).
 
 ## Develop
 
 ```bash
 cargo build
-cargo test              # 23 tests across ctcl-core + ctcl-store
+cargo test               # 50 tests across ctcl-core + ctcl-store + ctcl-desktop
 cargo run --bin ctcl -- now
 cargo run --bin ctcl -- convert --value 1783420000.5 --from unix_s --to rfc3339 --tz Asia/Taipei
 cargo run --bin ctcl -- serve                       # opens a browser, no terminal needed after this
@@ -71,16 +77,43 @@ cargo tauri dev --manifest-path ctcl-desktop/Cargo.toml
 all done and tested (23 unit tests + full manual CLI smoke test of every
 subcommand, including real cross-process persistence and every error path).
 
-**Phase 1 (Desktop MVP) started and Neo-verified 2026-07-12**: a real Tauri
-window (title "CTCL Temporal Port") reusing the Phase 0 preview's UI, wired to
-`ctcl-core` through Tauri commands instead of HTTP. This is the one thing that
-genuinely needed a human's eyes rather than automated testing — Neo confirmed
-the live clock and the convert flow (Taipei → Tokyo, Taipei → UTC) both
-produce correct results in the actual running window. Still to come: the
-Dashboard's Systems/Groups sections (backend commands already wired -
-`list_systems`/`list_groups`/`expand_group` - just no UI yet), the local API +
-capability-scoped permission model (Phase 2), device clock observation
-(Phase 3).
+**Phase 1 (Desktop MVP) Neo-verified 2026-07-12**: a real Tauri window (title
+"CTCL Temporal Port") reusing the Phase 0 preview's UI, wired to `ctcl-core`
+through Tauri commands instead of HTTP. This is the one thing that genuinely
+needed a human's eyes rather than automated testing — Neo confirmed the live
+clock and the convert flow (Taipei → Tokyo, Taipei → UTC) both produce correct
+results in the actual running window.
+
+**Phase 2 (Local Gateway) Neo-verified 2026-07-12**: the loopback HTTP API
+(`local_api.rs`) plus a Settings tab generated dynamically from the backend's
+scope list and feature-status data, so the UI can't silently drift from what's
+real. 6 real socket-level integration tests (raw `TcpStream`, not mocks).
+
+**Phase 3 (Device Clock Observer) shipped 2026-07-12**: a background sampling
+thread (`device_observer.rs`) compares the system wall clock against a
+monotonic anchor on a configurable interval (default 20s) and classifies the
+gap as `normal` / `drift` / `sleep_wake` / `rollback`
+(`ctcl_store::device_observer::classify_gap`, a pure function with its own
+unit tests — no OS-specific sleep/wake hooks needed, since a wall-clock gap
+that vastly exceeds the requested interval is itself a platform-independent
+signal that the process wasn't continuously running). Only anomalies are
+persisted; the *current* status (including "everything is fine") is a
+separate, in-memory concern read live by the Settings UI. Exposed three ways,
+consistently: a Tauri command (`device_observer_status` /
+`list_device_events`), a Local API route (`GET /v1/device-events`, gated by
+the `device_clock.read` scope that Phase 2 had already reserved), and a new
+Settings card. Verified with real background-thread tests across real
+wall-clock time (not mocked) plus classify_gap unit tests covering every
+branch, including the cross-platform ambiguity in whether a monotonic clock's
+elapsed reading includes suspended time. **The Settings UI card itself is
+implemented but not yet eyeballed in a real window** — same discipline as
+every prior UI change in this project: backend fully tested automatically,
+visual confirmation of an actual native Tauri window is left for Neo.
+
+Still to come: the Dashboard's Systems/Groups sections (backend commands
+already wired - `list_systems`/`list_groups`/`expand_group` - just no UI yet),
+Phase 4 (triggers), Phase 5 (team sync), Phase 6 (mobile companion, explicitly
+last per the whitepaper's own ordering).
 
 This is intentionally **not** trying to replicate CTCL Web's whole surface at
 once — it starts from the same core math and grows outward, same as the Worker

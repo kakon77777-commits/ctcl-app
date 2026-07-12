@@ -7,12 +7,14 @@
 
 mod error;
 pub mod audit;
+pub mod device_observer;
 pub mod group;
 pub mod instant;
 pub mod settings;
 pub mod system;
 
 pub use audit::AuditEntry;
+pub use device_observer::{DeviceEvent, EventKind};
 pub use error::StoreError;
 pub use group::GroupRecord;
 pub use instant::InstantRecord;
@@ -73,6 +75,14 @@ impl Store {
                 scope   TEXT,
                 allowed INTEGER NOT NULL,
                 reason  TEXT
+            );
+            CREATE TABLE IF NOT EXISTS device_events (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                at           TEXT NOT NULL,
+                kind         TEXT NOT NULL,
+                delta_ms     INTEGER NOT NULL,
+                wall_gap_ms  INTEGER NOT NULL,
+                mono_gap_ms  INTEGER NOT NULL
             );
             ",
         )?;

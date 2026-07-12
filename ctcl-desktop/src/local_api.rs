@@ -62,6 +62,7 @@ fn required_scope(method: &Method, path: &str) -> Option<&'static str> {
         (Method::Post, "/v1/groups") => Some("groups.write"),
         (Method::Post, p) if p.starts_with("/v1/groups/") && p.ends_with("/expand") => Some("groups.read"),
         (Method::Get, "/v1/audit") => Some("history.read"),
+        (Method::Get, "/v1/device-events") => Some("device_clock.read"),
         _ => None,
     }
 }
@@ -127,6 +128,10 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
         },
         (Method::Get, "/v1/audit") => match store.lock().unwrap().list_audit_log(50) {
             Ok(entries) => respond_ok(request, json!({ "entries": entries })),
+            Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+        },
+        (Method::Get, "/v1/device-events") => match store.lock().unwrap().list_device_events(50) {
+            Ok(events) => respond_ok(request, json!({ "events": events })),
             Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
         },
         (Method::Post, p) if p.starts_with("/v1/groups/") && p.ends_with("/expand") => {
@@ -238,6 +243,22 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert!(entries.iter().any(|e| e.allowed));
         assert!(entries.iter().filter(|e| !e.allowed).count() == 2);
+    }
+
+    #[test]
+    fn device_events_route_is_scope_gated_then_succeeds_once_granted() {
+        let (store, _handle) = test_store_with_token(4507, "secret-token");
+        // device_clock.read is off by default (§12.2) - the route must refuse.
+        let refused = raw_request(4507, "GET", "/v1/device-events", Some("secret-token"), "");
+        assert_eq!(refused.status, 403);
+
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("device_clock.read".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let allowed = raw_request(4507, "GET", "/v1/device-events", Some("secret-token"), "");
+        assert_eq!(allowed.status, 200);
+        assert!(allowed.body.contains("\"events\""));
     }
 
     #[test]

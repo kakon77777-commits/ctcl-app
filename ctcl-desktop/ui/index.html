@@ -91,7 +91,7 @@ input:disabled + .slider{opacity:.4;cursor:not-allowed}
 </head>
 <body>
 <div class="wrap">
-  <div class="badge">桌面版 · Phase 2</div>
+  <div class="badge">桌面版 · Phase 3</div>
   <div class="eyebrow">CTCL Temporal Port</div>
   <h1>你的電腦，現在的這一刻</h1>
   <p class="lede">這是真正的桌面程式——不是網頁，是雙擊就能打開的視窗。</p>
@@ -165,6 +165,22 @@ input:disabled + .slider{opacity:.4;cursor:not-allowed}
     </div>
 
     <div class="card">
+      <h2>裝置時鐘觀測 <span class="badge" id="deviceStatusBadge">…</span></h2>
+      <p style="color:var(--faint);font-size:.82rem;margin-bottom:.8rem">在背景定期比對這台電腦的時鐘——偵測睡眠／喚醒、時鐘被手動調整、或跟正常速度不一致的時鐘漂移。只會記錄異常，不會把一切正常也寫進紀錄。</p>
+      <div class="row-line">
+        <span class="lbl">開啟裝置時鐘觀測</span>
+        <label class="switch"><input type="checkbox" id="observerEnabled"><span class="slider"></span></label>
+      </div>
+      <label for="observerInterval">取樣間隔（秒）</label>
+      <input type="number" id="observerInterval" min="1" max="3600">
+      <label for="observerThreshold">漂移警告門檻（秒）</label>
+      <input type="number" id="observerThreshold" min="0" step="0.5">
+      <div class="mono-small" id="observerLast" style="margin-top:.9rem">尚未取樣</div>
+      <button class="sec" id="refreshDeviceEvents">重新整理異常紀錄</button>
+      <div id="deviceEventsList" style="margin-top:.8rem"></div>
+    </div>
+
+    <div class="card">
       <h2>之後會有的功能</h2>
       <p style="color:var(--faint);font-size:.82rem;margin-bottom:.4rem">這些先放在這裡當作清單，目前按了還不會有作用。</p>
       <div id="futureFeatures"></div>
@@ -192,7 +208,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
     document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
     tab.classList.add('active');
     document.getElementById(tab.dataset.view === 'home' ? 'viewHome' : 'viewSettings').classList.add('active');
-    if (tab.dataset.view === 'settings') { loadSettings(); loadAuditLog(); }
+    if (tab.dataset.view === 'settings') { loadSettings(); loadAuditLog(); loadDeviceStatus(); loadDeviceEvents(); }
   });
 });
 
@@ -305,6 +321,13 @@ function renderSettings(view) {
   if (view.local_api_running) { badge.textContent = '運行中 · port ' + currentSettings.local_api_port; badge.className = 'badge on'; }
   else { badge.textContent = '已停止'; badge.className = 'badge off'; }
 
+  document.getElementById('observerEnabled').checked = currentSettings.device_clock_observer_enabled;
+  document.getElementById('observerInterval').value = currentSettings.device_clock_sample_interval_s;
+  document.getElementById('observerThreshold').value = currentSettings.device_clock_drift_threshold_s;
+  const deviceBadge = document.getElementById('deviceStatusBadge');
+  if (view.device_observer_running) { deviceBadge.textContent = '運行中'; deviceBadge.className = 'badge on'; }
+  else { deviceBadge.textContent = '已停止'; deviceBadge.className = 'badge off'; }
+
   const scopesEl = document.getElementById('scopesList');
   scopesEl.innerHTML = view.all_scopes.map((s) => `
     <div class="row-line">
@@ -351,6 +374,55 @@ document.getElementById('auditEnabled').addEventListener('change', async (e) => 
   await saveSettings();
 });
 document.getElementById('refreshAudit').addEventListener('click', loadAuditLog);
+
+document.getElementById('observerEnabled').addEventListener('change', async (e) => {
+  currentSettings.device_clock_observer_enabled = e.target.checked;
+  await saveSettings();
+  loadDeviceStatus();
+});
+document.getElementById('observerInterval').addEventListener('change', async (e) => {
+  const v = parseInt(e.target.value, 10);
+  if (Number.isFinite(v) && v >= 1 && v <= 3600) { currentSettings.device_clock_sample_interval_s = v; await saveSettings(); }
+});
+document.getElementById('observerThreshold').addEventListener('change', async (e) => {
+  const v = parseFloat(e.target.value);
+  if (Number.isFinite(v) && v >= 0) { currentSettings.device_clock_drift_threshold_s = v; await saveSettings(); }
+});
+document.getElementById('refreshDeviceEvents').addEventListener('click', () => { loadDeviceStatus(); loadDeviceEvents(); });
+
+const EVENT_KIND_LABELS = { normal: '正常', drift: '時鐘漂移', sleep_wake: '睡眠／喚醒', rollback: '時鐘被往回調' };
+
+async function loadDeviceStatus() {
+  try {
+    const status = await invoke('device_observer_status');
+    const el = document.getElementById('observerLast');
+    if (!status.running) { el.textContent = '觀測已停止'; return; }
+    if (!status.last) { el.textContent = '已啟動，等待第一次取樣…'; return; }
+    const kindLabel = EVENT_KIND_LABELS[status.last.kind] || status.last.kind;
+    const when = new Date(status.last.at).toLocaleTimeString();
+    el.textContent = `${when} · ${kindLabel}（差異 ${status.last.delta_ms} ms）`;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function loadDeviceEvents() {
+  try {
+    const events = await invoke('list_device_events');
+    const el = document.getElementById('deviceEventsList');
+    if (!events.length) { el.innerHTML = '<div class="audit-empty">還沒有偵測到異常</div>'; return; }
+    el.innerHTML = events.map((ev) => `
+      <div class="audit-row">
+        <span class="audit-time">${new Date(ev.at).toLocaleString()}</span>
+        <span class="audit-method">${EVENT_KIND_LABELS[ev.kind] || ev.kind}</span>
+        <span class="audit-path">差異 ${ev.delta_ms} ms · 間隔 ${ev.wall_gap_ms} ms</span>
+        <span class="audit-result refused">異常</span>
+      </div>
+    `).join('');
+  } catch (e) {
+    console.error(e);
+  }
+}
 
 async function loadAuditLog() {
   try {

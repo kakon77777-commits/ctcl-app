@@ -56,11 +56,14 @@ pub struct Settings {
     // ---- Phase 2/§13: Security Model ----
     pub audit_log_enabled: bool,
 
-    // ---- Phase 3: Device Clock Observer - NOT YET IMPLEMENTED ----
-    // Present so the Settings UI can show what's coming; toggling this does
-    // nothing behaviorally yet. See Settings::status().
+    // ---- Phase 3: Device Clock Observer (whitepaper §4.2/§10) ----
+    // Off by default, same discipline as the local API (§7.2 "default off").
+    // When on, a background thread samples (wall clock, monotonic clock) every
+    // device_clock_sample_interval_s and classifies drift / sleep-wake /
+    // rollback via ctcl_store::device_observer::classify_gap.
     pub device_clock_observer_enabled: bool,
     pub device_clock_drift_threshold_s: f64,
+    pub device_clock_sample_interval_s: u64,
 
     // ---- Phase 4: Trigger Engine - NOT YET IMPLEMENTED ----
     pub triggers_enabled: bool,
@@ -80,6 +83,7 @@ impl Default for Settings {
             audit_log_enabled: true,
             device_clock_observer_enabled: false,
             device_clock_drift_threshold_s: 5.0,
+            device_clock_sample_interval_s: 20,
             triggers_enabled: false,
             encrypted_storage_enabled: false,
             retention_days: None,
@@ -102,7 +106,7 @@ impl Settings {
             FeatureStatus { key: "local_api", phase: "Phase 2", implemented: true },
             FeatureStatus { key: "scopes", phase: "Phase 2", implemented: true },
             FeatureStatus { key: "audit_log", phase: "Phase 2", implemented: true },
-            FeatureStatus { key: "device_clock_observer", phase: "Phase 3", implemented: false },
+            FeatureStatus { key: "device_clock_observer", phase: "Phase 3", implemented: true },
             FeatureStatus { key: "triggers", phase: "Phase 4", implemented: false },
             FeatureStatus { key: "encrypted_storage", phase: "\u{00a7}12.3", implemented: false },
             FeatureStatus { key: "retention_policy", phase: "\u{00a7}12.3", implemented: false },
@@ -159,6 +163,14 @@ mod tests {
         assert!(settings.is_granted("instant.read"));
         assert!(!settings.is_granted("systems.write"), "write scopes must default to off (§12.2)");
         assert!(!settings.is_granted("triggers.write"));
+        assert!(!settings.device_clock_observer_enabled, "device observer must default to disabled, same discipline as the local API");
+    }
+
+    #[test]
+    fn device_clock_observer_is_marked_implemented() {
+        let statuses = Settings::status();
+        let observer = statuses.iter().find(|s| s.key == "device_clock_observer").unwrap();
+        assert!(observer.implemented, "Phase 3 shipped - this must flip to true, not stay a roadmap placeholder");
     }
 
     #[test]
