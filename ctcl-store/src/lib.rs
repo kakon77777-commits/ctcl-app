@@ -6,13 +6,17 @@
 //! remember what it was told.
 
 mod error;
+pub mod audit;
 pub mod group;
 pub mod instant;
+pub mod settings;
 pub mod system;
 
+pub use audit::AuditEntry;
 pub use error::StoreError;
 pub use group::GroupRecord;
 pub use instant::InstantRecord;
+pub use settings::{Settings, ALL_SCOPES};
 pub use system::SystemRecord;
 
 use rusqlite::Connection;
@@ -56,6 +60,19 @@ impl Store {
                 version       INTEGER NOT NULL DEFAULT 1,
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                at      TEXT NOT NULL,
+                method  TEXT NOT NULL,
+                path    TEXT NOT NULL,
+                scope   TEXT,
+                allowed INTEGER NOT NULL,
+                reason  TEXT
             );
             ",
         )?;

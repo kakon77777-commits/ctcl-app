@@ -7,77 +7,168 @@
 <style>
 :root{
   --bg:#f4eddc; --surf:#fbf6ea; --surf2:#f4ecd9; --ink:#241d11; --dim:#5e5540; --faint:#897b60;
-  --gold:#8c6c1c; --gold2:#a9862a; --line:#e3d7bd; --line2:#d4c5a3;
+  --gold:#8c6c1c; --gold2:#a9862a; --line:#e3d7bd; --line2:#d4c5a3; --green:#3f7a3f; --red:#b0413e;
   --serif:Georgia,'Times New Roman',serif; --sans:ui-sans-serif,system-ui,'Segoe UI',Roboto,sans-serif;
   --mono:ui-monospace,'SF Mono',Consolas,monospace;
 }
 @media (prefers-color-scheme: dark){
-  :root{ --bg:#14100a; --surf:#1e190f; --surf2:#26200f; --ink:#ece3d0; --dim:#b6ab90; --faint:#7d7259; --gold:#cda24f; --gold2:#e7c884; --line:#2c2515; --line2:#3a3220; }
+  :root{ --bg:#14100a; --surf:#1e190f; --surf2:#26200f; --ink:#ece3d0; --dim:#b6ab90; --faint:#7d7259; --gold:#cda24f; --gold2:#e7c884; --line:#2c2515; --line2:#3a3220; --green:#7fbf7f; --red:#e08a86; }
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--ink);font:16px/1.6 var(--sans);padding:2rem 1.4rem 3rem;-webkit-user-select:none;user-select:none}
 .wrap{max-width:560px;margin:0 auto}
 .eyebrow{font:600 .7rem/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin-bottom:.5rem}
 h1{font-family:var(--serif);font-size:1.7rem;font-weight:700;margin-bottom:.3rem}
-.lede{color:var(--dim);margin-bottom:1.6rem;max-width:46ch;font-size:.92rem}
+h2small{font-family:var(--serif)}
+.lede{color:var(--dim);margin-bottom:1.2rem;max-width:46ch;font-size:.92rem}
 .card{border:1px solid var(--line);border-radius:1rem;background:var(--surf);padding:1.5rem 1.6rem;margin-bottom:1.2rem}
-.card h2{font-family:var(--serif);font-size:1.05rem;margin-bottom:1rem;color:var(--dim)}
+.card h2{font-family:var(--serif);font-size:1.05rem;margin-bottom:1rem;color:var(--dim);display:flex;align-items:center;justify-content:space-between;gap:.6rem}
 .big-time{font-family:var(--serif);font-size:1.75rem;font-weight:700;text-align:center;margin:.4rem 0 .3rem;color:var(--gold);-webkit-user-select:text;user-select:text}
 .big-sub{text-align:center;color:var(--faint);font-size:.85rem}
 .mono-small{font-family:var(--mono);font-size:.7rem;color:var(--faint);text-align:center;margin-top:.6rem;word-break:break-all;-webkit-user-select:text;user-select:text}
 label{display:block;font-size:.85rem;color:var(--dim);margin:.9rem 0 .35rem}
-input[type=datetime-local], select{
+input[type=datetime-local], input[type=text], input[type=number], select{
   width:100%;font:inherit;font-size:1rem;background:var(--surf2);border:1px solid var(--line2);color:var(--ink);
   border-radius:.6rem;padding:.65rem .75rem;
 }
+input[type=text].mono, input.token{font-family:var(--mono);font-size:.82rem;-webkit-user-select:text;user-select:text}
 button{
   margin-top:1.1rem;width:100%;font:600 1rem/1 var(--sans);background:var(--gold);color:#fff;border:0;
   border-radius:.6rem;padding:.85rem;cursor:pointer;transition:background .15s;
 }
 @media (prefers-color-scheme: dark){ button{ color:#1a1408 } }
 button:hover{background:var(--gold2)}
+button.sec{background:transparent;border:1px solid var(--line2);color:var(--ink);margin-top:.6rem}
+button.small{width:auto;padding:.5rem .9rem;font-size:.82rem;margin-top:0}
+.btn-row{display:flex;gap:.6rem;margin-top:.8rem}
+.btn-row button{margin-top:0;flex:1}
 .result{margin-top:1.1rem;border-top:1px solid var(--line);padding-top:1.1rem;text-align:center;display:none}
 .result.show{display:block}
 .result .out{font-family:var(--serif);font-size:1.3rem;font-weight:700;color:var(--gold);-webkit-user-select:text;user-select:text}
 .result .out-sub{color:var(--faint);font-size:.85rem;margin-top:.3rem}
-.err{color:#b0413e;text-align:center;margin-top:1rem;font-size:.9rem}
+.err{color:var(--red);text-align:center;margin-top:1rem;font-size:.9rem}
 footer{color:var(--faint);font-size:.76rem;text-align:center;margin-top:1.6rem;line-height:1.7}
 .badge{display:inline-block;font:600 .65rem/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;
   background:var(--surf2);border:1px solid var(--line2);color:var(--faint);border-radius:99px;padding:.25rem .6rem;margin-bottom:1rem}
+.badge.on{color:var(--green);border-color:var(--green)}
+.badge.off{color:var(--faint)}
+/* tabs */
+.tabs{display:flex;gap:.4rem;margin-bottom:1.4rem;border-bottom:1px solid var(--line);padding-bottom:.6rem}
+.tab{font:600 .88rem/1 var(--sans);background:transparent;border:0;color:var(--faint);padding:.5rem .9rem;
+  border-radius:.5rem;cursor:pointer;margin:0;width:auto}
+.tab.active{color:var(--gold);background:var(--surf2)}
+.view{display:none}
+.view.active{display:block}
+/* toggle switch */
+.switch{position:relative;display:inline-block;width:42px;height:24px;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:var(--line2);border-radius:99px;cursor:pointer;transition:.15s}
+.slider::before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.15s}
+input:checked + .slider{background:var(--gold)}
+input:checked + .slider::before{transform:translateX(18px)}
+input:disabled + .slider{opacity:.4;cursor:not-allowed}
+/* scope rows */
+.row-line{display:flex;justify-content:space-between;align-items:center;gap:.8rem;padding:.55rem 0;border-top:1px solid var(--line)}
+.row-line:first-child{border-top:0}
+.row-line .lbl{font-size:.88rem}
+.row-line .lbl .id{display:block;font-family:var(--mono);font-size:.68rem;color:var(--faint);margin-top:.15rem}
+/* future features */
+.future-row{display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-top:1px solid var(--line);color:var(--faint);font-size:.85rem}
+.future-row:first-child{border-top:0}
+.future-badge{font:600 .62rem/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;background:var(--surf2);
+  border:1px solid var(--line2);color:var(--faint);border-radius:99px;padding:.2rem .55rem;white-space:nowrap}
+/* audit log */
+.audit-row{display:grid;grid-template-columns:auto auto 1fr auto;gap:.5rem;align-items:baseline;padding:.4rem 0;
+  border-top:1px solid var(--line);font-size:.76rem}
+.audit-row:first-child{border-top:0}
+.audit-time{color:var(--faint);font-family:var(--mono);white-space:nowrap}
+.audit-method{font-family:var(--mono);font-weight:700}
+.audit-path{font-family:var(--mono);color:var(--dim);word-break:break-all}
+.audit-result.ok{color:var(--green)}
+.audit-result.refused{color:var(--red)}
+.audit-empty{color:var(--faint);font-size:.85rem;text-align:center;padding:.6rem 0}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="badge">桌面版 · Phase 1</div>
+  <div class="badge">桌面版 · Phase 2</div>
   <div class="eyebrow">CTCL Temporal Port</div>
   <h1>你的電腦，現在的這一刻</h1>
-  <p class="lede">這是真正的桌面程式——不是網頁，是雙擊就能打開的視窗。跟你之前看過的預覽版邏輯完全一樣，只是現在住在自己的視窗裡了。</p>
+  <p class="lede">這是真正的桌面程式——不是網頁，是雙擊就能打開的視窗。</p>
 
-  <div class="card">
-    <h2>現在</h2>
-    <div class="big-time" id="nowBig">讀取中…</div>
-    <div class="big-sub" id="nowSub">&nbsp;</div>
-    <div class="mono-small" id="nowRaw">&nbsp;</div>
+  <div class="tabs">
+    <button class="tab active" data-view="home">首頁</button>
+    <button class="tab" data-view="settings">設置</button>
   </div>
 
-  <div class="card">
-    <h2>換算時間</h2>
-    <label for="dt">選一個時間</label>
-    <input type="datetime-local" id="dt">
-    <label for="city">換算成這個地方的時間</label>
-    <select id="city">
-      <option value="Asia/Taipei">台北</option>
-      <option value="Asia/Tokyo">東京</option>
-      <option value="America/New_York">紐約</option>
-      <option value="Europe/London">倫敦</option>
-      <option value="UTC">世界標準時間（UTC）</option>
-    </select>
-    <button id="go">換算 →</button>
-    <div class="result" id="result">
-      <div class="out" id="resultOut">…</div>
-      <div class="out-sub" id="resultSub">&nbsp;</div>
+  <div class="view active" id="viewHome">
+    <div class="card">
+      <h2>現在</h2>
+      <div class="big-time" id="nowBig">讀取中…</div>
+      <div class="big-sub" id="nowSub">&nbsp;</div>
+      <div class="mono-small" id="nowRaw">&nbsp;</div>
     </div>
-    <div class="err" id="err"></div>
+
+    <div class="card">
+      <h2>換算時間</h2>
+      <label for="dt">選一個時間</label>
+      <input type="datetime-local" id="dt">
+      <label for="city">換算成這個地方的時間</label>
+      <select id="city">
+        <option value="Asia/Taipei">台北</option>
+        <option value="Asia/Tokyo">東京</option>
+        <option value="America/New_York">紐約</option>
+        <option value="Europe/London">倫敦</option>
+        <option value="UTC">世界標準時間（UTC）</option>
+      </select>
+      <button id="go">換算 →</button>
+      <div class="result" id="result">
+        <div class="out" id="resultOut">…</div>
+        <div class="out-sub" id="resultSub">&nbsp;</div>
+      </div>
+      <div class="err" id="err"></div>
+    </div>
+  </div>
+
+  <div class="view" id="viewSettings">
+    <div class="card">
+      <h2>本機 API <span class="badge" id="apiStatusBadge">…</span></h2>
+      <p style="color:var(--faint);font-size:.82rem;margin-bottom:.8rem">讓其他你信任的程式或 agent 呼叫這台電腦——預設關閉，只能從這台電腦自己存取，其他電腦連不到。</p>
+      <div class="row-line">
+        <span class="lbl">開啟本機 API</span>
+        <label class="switch"><input type="checkbox" id="apiEnabled"><span class="slider"></span></label>
+      </div>
+      <label for="apiPort">連接埠（port）</label>
+      <input type="number" id="apiPort" min="1024" max="65535">
+      <label for="apiToken">存取權杖（token）——其他程式要用這個才能呼叫</label>
+      <input type="text" class="mono token" id="apiToken" readonly>
+      <div class="btn-row">
+        <button class="sec small" id="copyToken">複製</button>
+        <button class="sec small" id="regenToken">重新產生</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>權限範圍</h2>
+      <p style="color:var(--faint);font-size:.82rem;margin-bottom:.4rem">本機 API 被呼叫時，只有打開的項目才會被允許——預設只開放低風險的讀取／換算。</p>
+      <div id="scopesList"></div>
+    </div>
+
+    <div class="card">
+      <h2>稽核紀錄</h2>
+      <div class="row-line">
+        <span class="lbl">記錄每一次本機 API 呼叫</span>
+        <label class="switch"><input type="checkbox" id="auditEnabled"><span class="slider"></span></label>
+      </div>
+      <button class="sec" id="refreshAudit">重新整理紀錄</button>
+      <div id="auditList" style="margin-top:.8rem"></div>
+    </div>
+
+    <div class="card">
+      <h2>之後會有的功能</h2>
+      <p style="color:var(--faint);font-size:.82rem;margin-bottom:.4rem">這些先放在這裡當作清單，目前按了還不會有作用。</p>
+      <div id="futureFeatures"></div>
+    </div>
   </div>
 
   <footer>
@@ -94,6 +185,17 @@ const CITY_NAMES = {
 };
 const WEEKDAYS = ["日","一","二","三","四","五","六"];
 
+// ---- tabs ----
+document.querySelectorAll('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
+    document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.view === 'home' ? 'viewHome' : 'viewSettings').classList.add('active');
+    if (tab.dataset.view === 'settings') { loadSettings(); loadAuditLog(); }
+  });
+});
+
 // The target string already carries its own timezone offset (e.g. +08:00 for
 // Taipei) - read its calendar digits LITERALLY, do not re-interpret through
 // the OS's own local zone, or a converted result would silently get converted
@@ -108,8 +210,6 @@ function friendlyFromIso(iso) {
   const h12 = ((hNum + 11) % 12) + 1;
   return `${y}年${+mo}月${+d}日（週${WEEKDAYS[dow]}）${ampm} ${h12}:${mi}`;
 }
-
-// The "now" card shows THIS machine's own local time.
 function friendlyLocal(iso) {
   const d = new Date(iso);
   const y = d.getFullYear(), mo = d.getMonth() + 1, day = d.getDate(), dow = d.getDay();
@@ -151,6 +251,124 @@ document.getElementById('go').addEventListener('click', async () => {
     errEl.textContent = String((e && e.message) || e);
   }
 });
+
+// ---- Settings (Phase 2) ----
+const SCOPE_LABELS = {
+  "instant.read": "讀取共同瞬間",
+  "instant.create": "建立共同瞬間",
+  "convert.execute": "執行時間換算",
+  "systems.read": "讀取自訂時鐘",
+  "systems.write": "建立／修改自訂時鐘",
+  "groups.read": "讀取時間群組",
+  "groups.write": "建立／修改時間群組",
+  "triggers.read": "讀取觸發器",
+  "triggers.write": "建立觸發器",
+  "device_clock.read": "讀取裝置時鐘狀態",
+  "history.read": "讀取稽核歷史",
+};
+const FEATURE_LABELS = {
+  local_api: "本機 API", scopes: "權限範圍", audit_log: "稽核紀錄",
+  device_clock_observer: "裝置時鐘觀測（睡眠喚醒、漂移偵測）",
+  triggers: "背景觸發器（時間到了自動做某件事）",
+  encrypted_storage: "本機資料加密儲存",
+  retention_policy: "資料保留天數（自動清除舊紀錄）",
+};
+
+let currentSettings = null;
+
+function extractSettingsOnly(view) {
+  const { all_scopes, feature_status, local_api_running, ...settings } = view;
+  return settings;
+}
+
+async function loadSettings() {
+  try {
+    const view = await invoke('get_settings');
+    currentSettings = extractSettingsOnly(view);
+    renderSettings(view);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function saveSettings() {
+  const view = await invoke('update_settings', { settings: currentSettings });
+  currentSettings = extractSettingsOnly(view);
+  renderSettings(view);
+}
+
+function renderSettings(view) {
+  document.getElementById('apiEnabled').checked = currentSettings.local_api_enabled;
+  document.getElementById('apiPort').value = currentSettings.local_api_port;
+  document.getElementById('apiToken').value = currentSettings.local_api_token;
+  const badge = document.getElementById('apiStatusBadge');
+  if (view.local_api_running) { badge.textContent = '運行中 · port ' + currentSettings.local_api_port; badge.className = 'badge on'; }
+  else { badge.textContent = '已停止'; badge.className = 'badge off'; }
+
+  const scopesEl = document.getElementById('scopesList');
+  scopesEl.innerHTML = view.all_scopes.map((s) => `
+    <div class="row-line">
+      <span class="lbl">${SCOPE_LABELS[s] || s}<span class="id">${s}</span></span>
+      <label class="switch"><input type="checkbox" data-scope="${s}" ${currentSettings.scopes[s] ? 'checked' : ''}><span class="slider"></span></label>
+    </div>
+  `).join('');
+  scopesEl.querySelectorAll('input[type=checkbox]').forEach((cb) => {
+    cb.addEventListener('change', async () => {
+      currentSettings.scopes[cb.dataset.scope] = cb.checked;
+      await saveSettings();
+    });
+  });
+
+  document.getElementById('auditEnabled').checked = currentSettings.audit_log_enabled;
+
+  const futureEl = document.getElementById('futureFeatures');
+  futureEl.innerHTML = view.feature_status.filter((f) => !f.implemented).map((f) => `
+    <div class="future-row">
+      <span>${FEATURE_LABELS[f.key] || f.key}</span>
+      <span class="future-badge">${f.phase} · 尚未實作</span>
+    </div>
+  `).join('');
+}
+
+document.getElementById('apiEnabled').addEventListener('change', async (e) => {
+  currentSettings.local_api_enabled = e.target.checked;
+  await saveSettings();
+});
+document.getElementById('apiPort').addEventListener('change', async (e) => {
+  const v = parseInt(e.target.value, 10);
+  if (Number.isFinite(v) && v >= 1024 && v <= 65535) { currentSettings.local_api_port = v; await saveSettings(); }
+});
+document.getElementById('regenToken').addEventListener('click', async () => {
+  const view = await invoke('regenerate_api_token');
+  currentSettings = extractSettingsOnly(view);
+  renderSettings(view);
+});
+document.getElementById('copyToken').addEventListener('click', () => {
+  navigator.clipboard.writeText(currentSettings.local_api_token);
+});
+document.getElementById('auditEnabled').addEventListener('change', async (e) => {
+  currentSettings.audit_log_enabled = e.target.checked;
+  await saveSettings();
+});
+document.getElementById('refreshAudit').addEventListener('click', loadAuditLog);
+
+async function loadAuditLog() {
+  try {
+    const entries = await invoke('list_audit_log');
+    const el = document.getElementById('auditList');
+    if (!entries.length) { el.innerHTML = '<div class="audit-empty">還沒有紀錄</div>'; return; }
+    el.innerHTML = entries.map((e) => `
+      <div class="audit-row">
+        <span class="audit-time">${new Date(e.at).toLocaleTimeString()}</span>
+        <span class="audit-method">${e.method}</span>
+        <span class="audit-path">${e.path}</span>
+        <span class="audit-result ${e.allowed ? 'ok' : 'refused'}">${e.allowed ? '允許' : ('拒絕' + (e.reason ? '：' + e.reason : ''))}</span>
+      </div>
+    `).join('');
+  } catch (e) {
+    console.error(e);
+  }
+}
 </script>
 </body>
 </html>
