@@ -65,8 +65,12 @@ pub struct Settings {
     pub device_clock_drift_threshold_s: f64,
     pub device_clock_sample_interval_s: u64,
 
-    // ---- Phase 4: Trigger Engine - NOT YET IMPLEMENTED ----
+    // ---- Phase 4: Trigger Engine (whitepaper §4.3/§9.4) ----
+    // Off by default, same discipline as the local API and device observer.
+    // When on, a background thread polls ctcl_store::trigger::Store::due_triggers
+    // every trigger_check_interval_s and dispatches fired actions.
     pub triggers_enabled: bool,
+    pub trigger_check_interval_s: u64,
 
     // ---- §12.3: Local Data Protection - NOT YET IMPLEMENTED ----
     pub encrypted_storage_enabled: bool,
@@ -85,6 +89,7 @@ impl Default for Settings {
             device_clock_drift_threshold_s: 5.0,
             device_clock_sample_interval_s: 20,
             triggers_enabled: false,
+            trigger_check_interval_s: 5,
             encrypted_storage_enabled: false,
             retention_days: None,
         }
@@ -107,7 +112,7 @@ impl Settings {
             FeatureStatus { key: "scopes", phase: "Phase 2", implemented: true },
             FeatureStatus { key: "audit_log", phase: "Phase 2", implemented: true },
             FeatureStatus { key: "device_clock_observer", phase: "Phase 3", implemented: true },
-            FeatureStatus { key: "triggers", phase: "Phase 4", implemented: false },
+            FeatureStatus { key: "triggers", phase: "Phase 4", implemented: true },
             FeatureStatus { key: "encrypted_storage", phase: "\u{00a7}12.3", implemented: false },
             FeatureStatus { key: "retention_policy", phase: "\u{00a7}12.3", implemented: false },
         ]

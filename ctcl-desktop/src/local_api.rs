@@ -63,6 +63,7 @@ fn required_scope(method: &Method, path: &str) -> Option<&'static str> {
         (Method::Post, p) if p.starts_with("/v1/groups/") && p.ends_with("/expand") => Some("groups.read"),
         (Method::Get, "/v1/audit") => Some("history.read"),
         (Method::Get, "/v1/device-events") => Some("device_clock.read"),
+        (Method::Get, "/v1/triggers") => Some("triggers.read"),
         _ => None,
     }
 }
@@ -132,6 +133,10 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
         },
         (Method::Get, "/v1/device-events") => match store.lock().unwrap().list_device_events(50) {
             Ok(events) => respond_ok(request, json!({ "events": events })),
+            Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+        },
+        (Method::Get, "/v1/triggers") => match store.lock().unwrap().list_triggers() {
+            Ok(triggers) => respond_ok(request, json!({ "triggers": triggers })),
             Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
         },
         (Method::Post, p) if p.starts_with("/v1/groups/") && p.ends_with("/expand") => {
@@ -259,6 +264,21 @@ mod tests {
         let allowed = raw_request(4507, "GET", "/v1/device-events", Some("secret-token"), "");
         assert_eq!(allowed.status, 200);
         assert!(allowed.body.contains("\"events\""));
+    }
+
+    #[test]
+    fn triggers_route_is_scope_gated_then_succeeds_once_granted() {
+        let (store, _handle) = test_store_with_token(4508, "secret-token");
+        let refused = raw_request(4508, "GET", "/v1/triggers", Some("secret-token"), "");
+        assert_eq!(refused.status, 403);
+
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("triggers.read".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let allowed = raw_request(4508, "GET", "/v1/triggers", Some("secret-token"), "");
+        assert_eq!(allowed.status, 200);
+        assert!(allowed.body.contains("\"triggers\""));
     }
 
     #[test]

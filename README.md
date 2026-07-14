@@ -1,4 +1,4 @@
-# CTCL Temporal Port — desktop app (Phase 3: device clock observer)
+# CTCL Temporal Port — desktop app (Phase 4: trigger engine)
 
 The local, installable counterpart to [CTCL](https://commoninstant.org) (Common
 Temporal Coordinate Layer). Per the
@@ -41,18 +41,20 @@ desktop-first, not a rewrite of the hosted API.
 - `ctcl-desktop/` — the **real desktop shell** (Tauri 2). Same
   `ctcl-core`/`ctcl-store` as the CLI, called through Tauri's IPC instead of
   HTTP. A genuine double-click-able window, not a browser preview. Also owns
-  two background threads that only run when explicitly enabled (both off by
+  three background threads that only run when explicitly enabled (all off by
   default, whitepaper §7.2 "default off"): `local_api.rs` (Phase 2 — a
   loopback-only HTTP gateway, bearer-token auth, capability-scope enforced,
-  every call audit-logged) and `device_observer.rs` (Phase 3 — periodically
+  every call audit-logged), `device_observer.rs` (Phase 3 — periodically
   samples the wall clock against a monotonic anchor and classifies drift /
-  sleep-wake / manual clock rollback; only anomalies are persisted).
+  sleep-wake / manual clock rollback; only anomalies are persisted), and
+  `trigger_engine.rs` (Phase 4 — polls due triggers and dispatches their
+  action through a pluggable `ActionDispatcher`).
 
 ## Develop
 
 ```bash
 cargo build
-cargo test               # 50 tests across ctcl-core + ctcl-store + ctcl-desktop
+cargo test               # 64 tests across ctcl-core + ctcl-store + ctcl-desktop
 cargo run --bin ctcl -- now
 cargo run --bin ctcl -- convert --value 1783420000.5 --from unix_s --to rfc3339 --tz Asia/Taipei
 cargo run --bin ctcl -- serve                       # opens a browser, no terminal needed after this
@@ -110,10 +112,42 @@ implemented but not yet eyeballed in a real window** — same discipline as
 every prior UI change in this project: backend fully tested automatically,
 visual confirmation of an actual native Tauri window is left for Neo.
 
+**Phase 4 (Trigger Engine) shipped 2026-07-14**, whitepaper §4.3/§9.4:
+$I^*=I_{\text{target}} \Rightarrow \text{action}$ (kind `common_instant`, an
+absolute deadline) or $\tau_{\text{custom}}=\tau_{\text{target}} \Rightarrow
+\text{action}$ (kind `custom_time`, relative to a stored temporal system's
+local time, e.g. an agent's active-time clock). Both reduce to one comparison
+in `ctcl_store::trigger::Store::due_triggers`: is a live numeric value
+(wall-clock unix seconds, or the named system's current local seconds via the
+already-existing `system_now`) `>=` or `<=` a target. `==` is deliberately not
+offered — under periodic polling it would almost always step over an exact
+instant and silently never fire, a footgun rather than a feature. A trigger
+fires exactly once (`active` → `fired`), and only after its action actually
+succeeds — a failed dispatch leaves it `active` for retry next tick rather
+than being marked fired without the action happening.
+
+Two action kinds: `notification` (logged; no OS toast/system-tray integration
+yet, honestly not claimed) and `callback` (hands a URI to the OS's own default
+handler — `start`/`open`/`xdg-open` — so whatever app owns that scheme decides
+what happens next; CTCL does not register or resolve schemes itself, matching
+§7.1's "private scheme only" scope for this phase). Dispatch is behind an
+`ActionDispatcher` trait so automated tests never actually open a URI or spawn
+a process — a `FakeDispatcher` records calls instead, while the real desktop
+app uses `RealDispatcher`. Exposed the same three consistent ways as Phase 3:
+Tauri commands (`create_trigger`/`list_triggers`/`cancel_trigger`), a Local
+API route (`GET /v1/triggers`, gated by the already-reserved `triggers.read`
+scope), and a Settings card (create form + live list + cancel buttons).
+14 new tests (9 condition/persistence tests in `ctcl-store`, including a
+countdown-style `<=` case; 4 dispatch tests in `ctcl-desktop` including one
+real background-thread firing over real wall-clock time; 1 new scope-gated
+Local API route test). Same discipline as every prior UI change: backend
+fully tested automatically, the Settings card's actual rendering in a native
+window is left for Neo.
+
 Still to come: the Dashboard's Systems/Groups sections (backend commands
 already wired - `list_systems`/`list_groups`/`expand_group` - just no UI yet),
-Phase 4 (triggers), Phase 5 (team sync), Phase 6 (mobile companion, explicitly
-last per the whitepaper's own ordering).
+Phase 5 (team sync), Phase 6 (mobile companion, explicitly last per the
+whitepaper's own ordering).
 
 This is intentionally **not** trying to replicate CTCL Web's whole surface at
 once — it starts from the same core math and grows outward, same as the Worker

@@ -12,6 +12,7 @@ pub mod group;
 pub mod instant;
 pub mod settings;
 pub mod system;
+pub mod trigger;
 
 pub use audit::AuditEntry;
 pub use device_observer::{DeviceEvent, EventKind};
@@ -20,6 +21,7 @@ pub use group::GroupRecord;
 pub use instant::InstantRecord;
 pub use settings::{Settings, ALL_SCOPES};
 pub use system::SystemRecord;
+pub use trigger::{ActionKind, Operator, Trigger, TriggerAction, TriggerKind, TriggerStatus};
 
 use rusqlite::Connection;
 
@@ -83,6 +85,17 @@ impl Store {
                 delta_ms     INTEGER NOT NULL,
                 wall_gap_ms  INTEGER NOT NULL,
                 mono_gap_ms  INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS triggers (
+                id            TEXT PRIMARY KEY,
+                kind          TEXT NOT NULL,
+                system_id     TEXT,
+                operator      TEXT NOT NULL,
+                target_value  REAL NOT NULL,
+                action_json   TEXT NOT NULL,
+                status        TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                fired_at      TEXT
             );
             ",
         )?;

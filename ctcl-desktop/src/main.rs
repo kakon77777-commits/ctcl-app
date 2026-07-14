@@ -6,16 +6,18 @@
 
 mod device_observer;
 mod local_api;
+mod trigger_engine;
 
 use ctcl_core::{from_ns, now_view, to_ns};
-use ctcl_store::{AuditEntry, DeviceEvent, Settings, Store, ALL_SCOPES};
-use serde::Serialize;
+use ctcl_store::{ActionKind, AuditEntry, DeviceEvent, Operator, Settings, Store, Trigger, TriggerAction, TriggerKind, ALL_SCOPES};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 struct AppState {
     store: Arc<Mutex<Store>>,
     local_api: Mutex<Option<local_api::LocalApiHandle>>,
     device_observer: Mutex<Option<device_observer::ObserverHandle>>,
+    trigger_engine: Mutex<Option<trigger_engine::TriggerEngineHandle>>,
 }
 
 #[derive(Serialize)]
@@ -62,17 +64,20 @@ struct SettingsView {
     feature_status: Vec<ctcl_store::settings::FeatureStatus>,
     local_api_running: bool,
     device_observer_running: bool,
+    trigger_engine_running: bool,
 }
 
 fn settings_view(state: &tauri::State<AppState>, settings: Settings) -> SettingsView {
     let running = state.local_api.lock().unwrap().is_some();
     let observer_running = state.device_observer.lock().unwrap().is_some();
+    let trigger_running = state.trigger_engine.lock().unwrap().is_some();
     SettingsView {
         settings,
         all_scopes: ALL_SCOPES,
         feature_status: Settings::status(),
         local_api_running: running,
         device_observer_running: observer_running,
+        trigger_engine_running: trigger_running,
     }
 }
 
@@ -90,6 +95,7 @@ fn update_settings(state: tauri::State<AppState>, settings: Settings) -> Result<
     state.store.lock().unwrap().save_settings(&settings).map_err(|e| e.to_string())?;
     sync_local_api(&state, &settings);
     sync_device_observer(&state, &settings);
+    sync_trigger_engine(&state, &settings);
     Ok(settings_view(&state, settings))
 }
 
@@ -127,6 +133,43 @@ fn list_device_events(state: tauri::State<AppState>) -> Result<Vec<DeviceEvent>,
     state.store.lock().unwrap().list_device_events(50).map_err(|e| e.to_string())
 }
 
+// ---- Trigger Engine (Phase 4) -----------------------------------------------
+
+#[derive(Deserialize)]
+struct TriggerInput {
+    id: String,
+    kind: String,           // "common_instant" | "custom_time"
+    system_id: Option<String>,
+    operator: String,       // ">=" | "<="
+    target_value: f64,
+    action_kind: String,    // "notification" | "callback"
+    action_target: String,
+}
+
+#[tauri::command]
+fn create_trigger(state: tauri::State<AppState>, input: TriggerInput) -> Result<Trigger, String> {
+    let kind = if input.kind == "custom_time" { TriggerKind::CustomTime } else { TriggerKind::CommonInstant };
+    let operator = Operator::parse(&input.operator).map_err(|e| e.to_string())?;
+    let action_kind = if input.action_kind == "callback" { ActionKind::Callback } else { ActionKind::Notification };
+    let action = TriggerAction { kind: action_kind, target: input.action_target };
+    state
+        .store
+        .lock()
+        .unwrap()
+        .create_trigger(&input.id, kind, input.system_id.as_deref(), operator, input.target_value, action)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_triggers(state: tauri::State<AppState>) -> Result<Vec<Trigger>, String> {
+    state.store.lock().unwrap().list_triggers().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cancel_trigger(state: tauri::State<AppState>, id: String) -> Result<Trigger, String> {
+    state.store.lock().unwrap().cancel_trigger(&id).map_err(|e| e.to_string())
+}
+
 /// Ensure the running local API (if any) matches current settings - start it
 /// if now enabled, stop it if now disabled, restart it if the port changed.
 fn sync_local_api(state: &tauri::State<AppState>, settings: &Settings) {
@@ -154,6 +197,19 @@ fn sync_device_observer(state: &tauri::State<AppState>, settings: &Settings) {
     }
 }
 
+/// Same start/stop discipline as the other two background threads.
+fn sync_trigger_engine(state: &tauri::State<AppState>, settings: &Settings) {
+    let mut slot = state.trigger_engine.lock().unwrap();
+    *slot = None; // dropping the old handle (if any) stops the evaluation thread
+    if settings.triggers_enabled {
+        *slot = Some(trigger_engine::start(
+            state.store.clone(),
+            Arc::new(trigger_engine::RealDispatcher),
+            settings.trigger_check_interval_s,
+        ));
+    }
+}
+
 fn main() {
     let db_path = "ctcl-desktop-data.sqlite3";
     let store = Store::open(db_path).unwrap_or_else(|e| {
@@ -174,9 +230,18 @@ fn main() {
         .as_ref()
         .filter(|s| s.device_clock_observer_enabled)
         .map(|s| device_observer::start(store.clone(), s.device_clock_sample_interval_s, s.device_clock_drift_threshold_s));
+    let triggers = initial_settings
+        .as_ref()
+        .filter(|s| s.triggers_enabled)
+        .map(|s| trigger_engine::start(store.clone(), Arc::new(trigger_engine::RealDispatcher), s.trigger_check_interval_s));
 
     tauri::Builder::default()
-        .manage(AppState { store, local_api: Mutex::new(local_api), device_observer: Mutex::new(observer) })
+        .manage(AppState {
+            store,
+            local_api: Mutex::new(local_api),
+            device_observer: Mutex::new(observer),
+            trigger_engine: Mutex::new(triggers),
+        })
         .invoke_handler(tauri::generate_handler![
             now,
             convert,
@@ -189,6 +254,9 @@ fn main() {
             list_audit_log,
             device_observer_status,
             list_device_events,
+            create_trigger,
+            list_triggers,
+            cancel_trigger,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the CTCL Temporal Port app");
