@@ -43,9 +43,43 @@ fn list_systems(state: tauri::State<AppState>) -> Result<Vec<String>, String> {
     state.store.lock().unwrap().list_systems().map_err(|e| e.to_string())
 }
 
+/// Constant-rate only, matching ctcl-cli's own `system create` scope
+/// (piecewise/paused/table systems remain CLI/API-only for now).
+/// rename_all=snake_case so the JS side passes exactly epoch_parent_sec,
+/// same explicit-match discipline as TriggerInput - no reliance on Tauri's
+/// implicit camelCase<->snake_case argument conversion.
+#[tauri::command(rename_all = "snake_case")]
+fn create_system(state: tauri::State<AppState>, id: String, epoch_parent_sec: f64, rate: f64, offset: f64) -> Result<ctcl_store::SystemRecord, String> {
+    state
+        .store
+        .lock()
+        .unwrap()
+        .create_system(&id, None, epoch_parent_sec, ctcl_core::Rate::Constant { value: rate }, offset)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_system(state: tauri::State<AppState>, id: String) -> Result<serde_json::Value, String> {
+    let store = state.store.lock().unwrap();
+    let record = store.get_system(&id).map_err(|e| e.to_string())?;
+    let now_s = ctcl_core::now_ns() as f64 / 1e9;
+    let (local, extra) = store.system_now(&id, now_s).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "record": record, "current_local_seconds": local, "extra": extra }))
+}
+
 #[tauri::command]
 fn list_groups(state: tauri::State<AppState>) -> Result<Vec<String>, String> {
     state.store.lock().unwrap().list_groups().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_group(state: tauri::State<AppState>, id: String, members: Vec<String>, owner: Option<String>) -> Result<ctcl_store::GroupRecord, String> {
+    state.store.lock().unwrap().create_group(&id, &members, owner.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_group(state: tauri::State<AppState>, id: String) -> Result<ctcl_store::GroupRecord, String> {
+    state.store.lock().unwrap().get_group(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -246,7 +280,11 @@ fn main() {
             now,
             convert,
             list_systems,
+            create_system,
+            get_system,
             list_groups,
+            create_group,
+            get_group,
             expand_group,
             get_settings,
             update_settings,

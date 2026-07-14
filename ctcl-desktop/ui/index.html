@@ -98,6 +98,7 @@ input:disabled + .slider{opacity:.4;cursor:not-allowed}
 
   <div class="tabs">
     <button class="tab active" data-view="home">首頁</button>
+    <button class="tab" data-view="dashboard">時鐘與群組</button>
     <button class="tab" data-view="settings">設置</button>
   </div>
 
@@ -127,6 +128,38 @@ input:disabled + .slider{opacity:.4;cursor:not-allowed}
         <div class="out-sub" id="resultSub">&nbsp;</div>
       </div>
       <div class="err" id="err"></div>
+    </div>
+  </div>
+
+  <div class="view" id="viewDashboard">
+    <div class="card">
+      <h2>自訂時鐘</h2>
+      <p style="color:var(--faint);font-size:.82rem;margin-bottom:.8rem">建立一個以固定倍率走的時鐘——遊戲世界、模擬加速、或任何跟現實時間不同步的時間軸。目前只支援固定倍率（進階的分段／暫停／查表時鐘，可以透過 CLI 或 API 建立）。</p>
+      <label for="sysId">系統 ID</label>
+      <input type="text" class="mono" id="sysId" placeholder="user:game_world">
+      <label for="sysEpoch">起始時間（對應到現實時間的哪一刻）</label>
+      <input type="datetime-local" id="sysEpoch">
+      <label for="sysRate">倍率（現實時間每過 1 秒，這個時鐘走幾秒）</label>
+      <input type="number" id="sysRate" step="any" placeholder="20">
+      <label for="sysOffset">偏移量（秒，選填）</label>
+      <input type="number" id="sysOffset" step="any" placeholder="0">
+      <button id="createSystem">建立時鐘</button>
+      <div class="err" id="sysErr"></div>
+      <button class="sec" id="refreshSystems" style="margin-top:1.1rem">重新整理時鐘清單</button>
+      <div id="systemsList" style="margin-top:.8rem"></div>
+    </div>
+
+    <div class="card">
+      <h2>時間群組</h2>
+      <p style="color:var(--faint);font-size:.82rem;margin-bottom:.8rem">把好幾個時區或自訂時鐘綁在一起，一次展開同一個瞬間在每個成員裡是什麼時間——「一瞬間，多世界」。</p>
+      <label for="grpId">群組 ID</label>
+      <input type="text" class="mono" id="grpId" placeholder="group:project-alpha">
+      <label for="grpMembers">成員（逗號分隔）</label>
+      <input type="text" class="mono" id="grpMembers" placeholder="utc,tz:Asia/Taipei,user:game_world">
+      <button id="createGroup">建立群組</button>
+      <div class="err" id="grpErr"></div>
+      <button class="sec" id="refreshGroups" style="margin-top:1.1rem">重新整理群組清單</button>
+      <div id="groupsList" style="margin-top:.8rem"></div>
     </div>
   </div>
 
@@ -244,12 +277,14 @@ const CITY_NAMES = {
 const WEEKDAYS = ["日","一","二","三","四","五","六"];
 
 // ---- tabs ----
+const VIEW_IDS = { home: 'viewHome', dashboard: 'viewDashboard', settings: 'viewSettings' };
 document.querySelectorAll('.tab').forEach((tab) => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
     document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
     tab.classList.add('active');
-    document.getElementById(tab.dataset.view === 'home' ? 'viewHome' : 'viewSettings').classList.add('active');
+    document.getElementById(VIEW_IDS[tab.dataset.view] || 'viewHome').classList.add('active');
+    if (tab.dataset.view === 'dashboard') { loadSystems(); loadGroups(); }
     if (tab.dataset.view === 'settings') { loadSettings(); loadAuditLog(); loadDeviceStatus(); loadDeviceEvents(); loadTriggers(); }
   });
 });
@@ -566,6 +601,103 @@ async function loadAuditLog() {
     console.error(e);
   }
 }
+
+// ---- Dashboard: Custom Systems + Temporal Groups ----
+document.getElementById('createSystem').addEventListener('click', async () => {
+  const errEl = document.getElementById('sysErr');
+  errEl.textContent = '';
+  const id = document.getElementById('sysId').value.trim();
+  const epochVal = document.getElementById('sysEpoch').value;
+  const rate = parseFloat(document.getElementById('sysRate').value);
+  const offsetRaw = document.getElementById('sysOffset').value;
+  const offset = offsetRaw === '' ? 0 : parseFloat(offsetRaw);
+
+  if (!id) { errEl.textContent = '請填系統 ID。'; return; }
+  if (!epochVal) { errEl.textContent = '請選起始時間。'; return; }
+  if (!Number.isFinite(rate)) { errEl.textContent = '請填倍率。'; return; }
+
+  try {
+    await invoke('create_system', { id, epoch_parent_sec: new Date(epochVal).getTime() / 1000, rate, offset });
+    document.getElementById('sysId').value = '';
+    loadSystems();
+  } catch (e) {
+    errEl.textContent = String((e && e.message) || e);
+  }
+});
+document.getElementById('refreshSystems').addEventListener('click', loadSystems);
+
+async function loadSystems() {
+  try {
+    const ids = await invoke('list_systems');
+    const el = document.getElementById('systemsList');
+    if (!ids.length) { el.innerHTML = '<div class="audit-empty">還沒有自訂時鐘</div>'; return; }
+    const details = await Promise.all(ids.map((id) => invoke('get_system', { id }).catch(() => null)));
+    el.innerHTML = ids.map((id, i) => {
+      const d = details[i];
+      const now = d ? `目前：${d.current_local_seconds.toFixed(1)} 秒` : '讀取失敗';
+      return `
+        <div class="row-line">
+          <span class="lbl">${id}<span class="id">${now}</span></span>
+        </div>
+      `;
+    }).join('');
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+document.getElementById('createGroup').addEventListener('click', async () => {
+  const errEl = document.getElementById('grpErr');
+  errEl.textContent = '';
+  const id = document.getElementById('grpId').value.trim();
+  const membersRaw = document.getElementById('grpMembers').value.trim();
+  const members = membersRaw.split(',').map((m) => m.trim()).filter(Boolean);
+
+  if (!id) { errEl.textContent = '請填群組 ID。'; return; }
+  if (!members.length) { errEl.textContent = '請至少填一個成員。'; return; }
+
+  try {
+    await invoke('create_group', { id, members, owner: null });
+    document.getElementById('grpId').value = '';
+    document.getElementById('grpMembers').value = '';
+    loadGroups();
+  } catch (e) {
+    errEl.textContent = String((e && e.message) || e);
+  }
+});
+document.getElementById('refreshGroups').addEventListener('click', loadGroups);
+
+async function loadGroups() {
+  try {
+    const ids = await invoke('list_groups');
+    const el = document.getElementById('groupsList');
+    if (!ids.length) { el.innerHTML = '<div class="audit-empty">還沒有時間群組</div>'; return; }
+    el.innerHTML = ids.map((id) => `
+      <div class="row-line">
+        <span class="lbl">${id}</span>
+        <button class="sec small" data-expand="${id}">展開</button>
+      </div>
+      <div class="mono-small" id="expand-${cssEscape(id)}" style="text-align:left;display:none"></div>
+    `).join('');
+    el.querySelectorAll('button[data-expand]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.expand;
+        const out = document.getElementById('expand-' + cssEscape(id));
+        try {
+          const result = await invoke('expand_group', { id });
+          out.textContent = result.members.map((m) => `${m.member}: ${m.value ?? m.error}`).join(' · ');
+          out.style.display = 'block';
+        } catch (e) {
+          out.textContent = String((e && e.message) || e);
+          out.style.display = 'block';
+        }
+      });
+    });
+  } catch (e) {
+    console.error(e);
+  }
+}
+function cssEscape(s) { return s.replace(/[^a-zA-Z0-9_-]/g, '_'); }
 </script>
 </body>
 </html>

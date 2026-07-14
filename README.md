@@ -1,4 +1,4 @@
-# CTCL Temporal Port — desktop app (Phase 4: trigger engine)
+# CTCL Temporal Port — desktop app (Phase 1 Dashboard complete: Systems & Groups UI)
 
 The local, installable counterpart to [CTCL](https://commoninstant.org) (Common
 Temporal Coordinate Layer). Per the
@@ -144,10 +144,35 @@ Local API route test). Same discipline as every prior UI change: backend
 fully tested automatically, the Settings card's actual rendering in a native
 window is left for Neo.
 
-Still to come: the Dashboard's Systems/Groups sections (backend commands
-already wired - `list_systems`/`list_groups`/`expand_group` - just no UI yet),
-Phase 5 (team sync), Phase 6 (mobile companion, explicitly last per the
-whitepaper's own ordering).
+**Dashboard: Systems & Groups UI shipped 2026-07-14** — this closes the last
+piece of Phase 1's own roadmap item list (`Dashboard; Convert; Systems;
+Groups; Local API; URI Scheme` — Systems/Groups had been backend-only debt
+carried since Phase 1). A new third tab ("時鐘與群組") alongside Home and
+Settings: a **Custom Systems** card (create a constant-rate system — id,
+epoch, rate, offset, matching `ctcl-cli`'s own `system create` scope, which is
+also constant-rate-only; piecewise/paused/table systems remain CLI/API-only)
+with a live list showing each system's current local seconds, and a
+**Temporal Groups** card (create — id, comma-separated members — with a live
+list and a per-group "展開/expand" button that projects the current instant
+across every member inline). New Tauri commands: `create_system`/`get_system`
+(bundles the stored record with a live `system_now` evaluation),
+`create_group`/`get_group` (both thin wrappers over already-tested
+`ctcl-store` methods — no new store logic, so the existing 64 tests cover the
+underlying behavior unchanged; this increment is UI wiring, not new backend
+capability). One real naming gotcha caught before it could become a silent
+runtime bug: Tauri's default JS-camelCase → Rust-snake_case argument
+conversion is easy to get wrong for a multi-word parameter with no way to
+verify it interactively (no native-window test tool) — `create_system`
+explicitly declares `#[tauri::command(rename_all = "snake_case")]` and the JS
+side passes `epoch_parent_sec` verbatim, so there's no implicit-conversion
+assumption to get wrong, matching the explicit-match discipline
+`create_trigger`'s struct argument already required.
+
+Still to come: Phase 5 (team sync — note this needs an actual sync-backend
+*product* decision, e.g. self-hosted vs. hub on commoninstant.org vs. a new
+paid tier, not just more local Rust code, so it's being left for Neo to weigh
+in on rather than architected unilaterally) and Phase 6 (mobile companion,
+explicitly last per the whitepaper's own ordering).
 
 This is intentionally **not** trying to replicate CTCL Web's whole surface at
 once — it starts from the same core math and grows outward, same as the Worker
