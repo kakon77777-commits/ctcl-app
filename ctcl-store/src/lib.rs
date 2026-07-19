@@ -13,6 +13,7 @@ pub mod instant;
 pub mod settings;
 pub mod system;
 pub mod trigger;
+pub mod wake_event;
 
 pub use audit::AuditEntry;
 pub use device_observer::{DeviceEvent, EventKind};
@@ -22,6 +23,7 @@ pub use instant::InstantRecord;
 pub use settings::{Settings, ALL_SCOPES};
 pub use system::SystemRecord;
 pub use trigger::{ActionKind, Operator, Trigger, TriggerAction, TriggerKind, TriggerStatus};
+pub use wake_event::{WakeEvent, WakeEventStatus};
 
 use rusqlite::Connection;
 
@@ -96,6 +98,20 @@ impl Store {
                 status        TEXT NOT NULL,
                 created_at    TEXT NOT NULL,
                 fired_at      TEXT
+            );
+            CREATE TABLE IF NOT EXISTS wake_events (
+                event_id          TEXT PRIMARY KEY,
+                trigger_id        TEXT,
+                agent_id          TEXT NOT NULL,
+                reason            TEXT NOT NULL,
+                fired_json        TEXT NOT NULL,
+                observed_json     TEXT NOT NULL,
+                payload_json      TEXT NOT NULL,
+                status            TEXT NOT NULL,
+                attempt_count     INTEGER NOT NULL DEFAULT 0,
+                created_at        TEXT NOT NULL,
+                acknowledged_at   TEXT,
+                idempotency_key   TEXT NOT NULL UNIQUE
             );
             ",
         )?;

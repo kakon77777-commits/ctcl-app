@@ -64,15 +64,27 @@ fn required_scope(method: &Method, path: &str) -> Option<&'static str> {
         (Method::Get, "/v1/audit") => Some("history.read"),
         (Method::Get, "/v1/device-events") => Some("device_clock.read"),
         (Method::Get, "/v1/triggers") => Some("triggers.read"),
+        (Method::Get, "/v1/wake-events") => Some("wake_events.read"),
+        (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/ack") => Some("wake_events.ack"),
         _ => None,
     }
 }
 
+/// Minimal `key=value` query-string lookup - none of this API's endpoints
+/// needed one before wake-events' `?agent_id=&status=` filters (§10.2).
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        if k == key { Some(v) } else { None }
+    })
+}
+
 fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
     let method = request.method().clone();
-    let url = request.url().to_string();
+    let full_url = request.url().to_string();
+    let (path, query) = full_url.split_once('?').map(|(p, q)| (p.to_string(), q.to_string())).unwrap_or((full_url.clone(), String::new()));
     let method_str = format!("{method:?}").to_uppercase();
-    let scope = required_scope(&method, &url);
+    let scope = required_scope(&method, &path);
 
     let settings = match store.lock().unwrap().get_settings() {
         Ok(s) => s,
@@ -83,7 +95,7 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
     let auth_ok = request.headers().iter().any(|h| h.field.equiv("Authorization") && h.value.as_str() == expected);
     if !auth_ok {
         if settings.audit_log_enabled {
-            let _ = store.lock().unwrap().log_audit(&method_str, &url, scope, false, Some("missing or invalid bearer token"));
+            let _ = store.lock().unwrap().log_audit(&method_str, &full_url, scope, false, Some("missing or invalid bearer token"));
         }
         return respond_error(request, 401, "UNAUTHORIZED", "missing or invalid bearer token");
     }
@@ -91,20 +103,20 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
     if let Some(scope) = scope {
         if !settings.is_granted(scope) {
             if settings.audit_log_enabled {
-                let _ = store.lock().unwrap().log_audit(&method_str, &url, Some(scope), false, Some("scope not granted"));
+                let _ = store.lock().unwrap().log_audit(&method_str, &full_url, Some(scope), false, Some("scope not granted"));
             }
             return respond_error(request, 403, "SCOPE_NOT_GRANTED", &format!("this caller lacks the '{scope}' scope"));
         }
     }
     if settings.audit_log_enabled {
-        let _ = store.lock().unwrap().log_audit(&method_str, &url, scope, true, None);
+        let _ = store.lock().unwrap().log_audit(&method_str, &full_url, scope, true, None);
     }
 
     let mut body = String::new();
     let _ = request.as_reader().read_to_string(&mut body);
     let json_body: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
 
-    match (&method, url.as_str()) {
+    match (&method, path.as_str()) {
         (Method::Get, "/v1/now") => match now_view() {
             Ok(v) => respond_ok(request, json!(v)),
             Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
@@ -139,6 +151,23 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
             Ok(triggers) => respond_ok(request, json!({ "triggers": triggers })),
             Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
         },
+        (Method::Get, "/v1/wake-events") => {
+            let agent_id = query_param(&query, "agent_id");
+            // reuses WakeEventStatus's own serde mapping instead of a second,
+            // hand-duplicated string->variant table.
+            let status = query_param(&query, "status").and_then(|s| serde_json::from_str::<ctcl_store::WakeEventStatus>(&format!("\"{s}\"")).ok());
+            match store.lock().unwrap().list_wake_events(agent_id, status) {
+                Ok(events) => respond_ok(request, json!({ "wake_events": events })),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/ack") => {
+            let id = &p["/v1/wake-events/".len()..p.len() - "/ack".len()];
+            match store.lock().unwrap().ack_wake_event(id) {
+                Ok(ev) => respond_ok(request, json!(ev)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
         (Method::Post, p) if p.starts_with("/v1/groups/") && p.ends_with("/expand") => {
             let id = &p["/v1/groups/".len()..p.len() - "/expand".len()];
             let ns = ctcl_core::now_ns();
@@ -147,7 +176,7 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
                 Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
             }
         }
-        _ => respond_error(request, 404, "NOT_FOUND", &format!("no route: {method_str} {url}")),
+        _ => respond_error(request, 404, "NOT_FOUND", &format!("no route: {method_str} {full_url}")),
     }
 }
 
@@ -279,6 +308,57 @@ mod tests {
         let allowed = raw_request(4508, "GET", "/v1/triggers", Some("secret-token"), "");
         assert_eq!(allowed.status, 200);
         assert!(allowed.body.contains("\"triggers\""));
+    }
+
+    #[test]
+    fn wake_events_read_is_scope_gated_then_succeeds_once_granted() {
+        let (store, _handle) = test_store_with_token(4509, "secret-token");
+        store.lock().unwrap().create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+
+        let refused = raw_request(4509, "GET", "/v1/wake-events", Some("secret-token"), "");
+        assert_eq!(refused.status, 403, "wake_events.read is off by default, same discipline as triggers.read");
+
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("wake_events.read".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let allowed = raw_request(4509, "GET", "/v1/wake-events", Some("secret-token"), "");
+        assert_eq!(allowed.status, 200);
+        assert!(allowed.body.contains("\"wake_events\""));
+        assert!(allowed.body.contains("agent:primary"));
+    }
+
+    #[test]
+    fn wake_events_read_filters_by_query_params() {
+        let (store, _handle) = test_store_with_token(4510, "secret-token");
+        store.lock().unwrap().create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        store.lock().unwrap().create_wake_event("agent:b", None, "r", json!({}), json!({}), json!({}), "k2").unwrap();
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("wake_events.read".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let filtered = raw_request(4510, "GET", "/v1/wake-events?agent_id=agent:a", Some("secret-token"), "");
+        assert_eq!(filtered.status, 200);
+        assert!(filtered.body.contains("agent:a"));
+        assert!(!filtered.body.contains("agent:b"));
+    }
+
+    #[test]
+    fn wake_events_ack_is_scope_gated_and_transitions_status() {
+        let (store, _handle) = test_store_with_token(4511, "secret-token");
+        let ev = store.lock().unwrap().create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+
+        let refused = raw_request(4511, "POST", &format!("/v1/wake-events/{}/ack", ev.event_id), Some("secret-token"), "");
+        assert_eq!(refused.status, 403, "wake_events.ack is off by default");
+
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("wake_events.ack".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let allowed = raw_request(4511, "POST", &format!("/v1/wake-events/{}/ack", ev.event_id), Some("secret-token"), "");
+        assert_eq!(allowed.status, 200);
+        assert!(allowed.body.contains("\"acknowledged\""));
+        assert_eq!(store.lock().unwrap().get_wake_event(&ev.event_id).unwrap().status, ctcl_store::WakeEventStatus::Acknowledged);
     }
 
     #[test]

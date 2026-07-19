@@ -245,14 +245,22 @@ input:disabled + .slider{opacity:.4;cursor:not-allowed}
       <select id="triggerActionKind">
         <option value="notification">通知（記錄下來）</option>
         <option value="callback">呼叫 URI（交給作業系統打開）</option>
+        <option value="agent_wake">喚醒 Agent（產生 WakeEvent，不會直接做任何事）</option>
       </select>
-      <label for="triggerActionTarget">通知內容 ／ URI</label>
-      <input type="text" id="triggerActionTarget" placeholder="myapp://task/review">
+      <label for="triggerActionTarget">通知內容／URI／Agent ID</label>
+      <input type="text" id="triggerActionTarget" placeholder="myapp://task/review 或 agent:primary">
       <button id="createTrigger">建立觸發器</button>
       <div class="err" id="triggerErr"></div>
 
       <button class="sec" id="refreshTriggers" style="margin-top:1.1rem">重新整理觸發器清單</button>
       <div id="triggersList" style="margin-top:.8rem"></div>
+    </div>
+
+    <div class="card">
+      <h2>WakeEvents（Agent 喚醒紀錄）</h2>
+      <p style="color:var(--faint);font-size:.82rem;margin-bottom:.8rem">「喚醒 Agent」觸發器觸發時，CTCL 只會在這裡留一筆紀錄，不會替你呼叫任何工具或做任何決定 - 實際要不要行動、做什麼，是外部 Agent 自己的事。這裡可以手動標記「已確認收到」。</p>
+      <button class="sec" id="refreshWakeEvents">重新整理 WakeEvents</button>
+      <div id="wakeEventsList" style="margin-top:.8rem"></div>
     </div>
 
     <div class="card">
@@ -285,7 +293,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
     tab.classList.add('active');
     document.getElementById(VIEW_IDS[tab.dataset.view] || 'viewHome').classList.add('active');
     if (tab.dataset.view === 'dashboard') { loadSystems(); loadGroups(); }
-    if (tab.dataset.view === 'settings') { loadSettings(); loadAuditLog(); loadDeviceStatus(); loadDeviceEvents(); loadTriggers(); }
+    if (tab.dataset.view === 'settings') { loadSettings(); loadAuditLog(); loadDeviceStatus(); loadDeviceEvents(); loadTriggers(); loadWakeEvents(); }
   });
 });
 
@@ -358,11 +366,14 @@ const SCOPE_LABELS = {
   "triggers.write": "建立觸發器",
   "device_clock.read": "讀取裝置時鐘狀態",
   "history.read": "讀取稽核歷史",
+  "wake_events.read": "讀取 WakeEvents（Agent 喚醒紀錄）",
+  "wake_events.ack": "標記 WakeEvent 已確認收到",
 };
 const FEATURE_LABELS = {
   local_api: "本機 API", scopes: "權限範圍", audit_log: "稽核紀錄",
   device_clock_observer: "裝置時鐘觀測（睡眠喚醒、漂移偵測）",
   triggers: "背景觸發器（時間到了自動做某件事）",
+  wake_events: "WakeEvents（觸發器喚醒 Agent 的紀錄，不含實際行動）",
   encrypted_storage: "本機資料加密儲存",
   retention_policy: "資料保留天數（自動清除舊紀錄）",
 };
@@ -520,7 +531,12 @@ document.getElementById('refreshTriggers').addEventListener('click', loadTrigger
 
 const TRIGGER_KIND_LABELS = { common_instant: '共同瞬間', custom_time: '自訂時鐘' };
 const TRIGGER_STATUS_LABELS = { active: '等待中', fired: '已觸發', cancelled: '已取消' };
-const ACTION_KIND_LABELS = { notification: '通知', callback: 'URI 呼叫' };
+const ACTION_KIND_LABELS = { notification: '通知', callback: 'URI 呼叫', agent_wake: '喚醒 Agent' };
+const WAKE_EVENT_STATUS_LABELS = {
+  pending: '待處理', delivering: '傳遞中', delivered: '已送達', acknowledged: '已確認收到',
+  decided_no_action: '已決定不行動', decided_action: '已決定行動', completed: '已完成',
+  retry_wait: '等待重試', dead_letter: '已放棄（死信）',
+};
 
 document.getElementById('createTrigger').addEventListener('click', async () => {
   const errEl = document.getElementById('triggerErr');
@@ -577,6 +593,34 @@ async function loadTriggers() {
       btn.addEventListener('click', async () => {
         await invoke('cancel_trigger', { id: btn.dataset.cancel });
         loadTriggers();
+      });
+    });
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+document.getElementById('refreshWakeEvents').addEventListener('click', loadWakeEvents);
+
+async function loadWakeEvents() {
+  try {
+    const events = await invoke('list_wake_events', { agent_id: null, status: null });
+    const el = document.getElementById('wakeEventsList');
+    if (!events.length) { el.innerHTML = '<div class="audit-empty">還沒有 WakeEvent</div>'; return; }
+    el.innerHTML = events.map((ev) => `
+      <div class="row-line">
+        <span class="lbl">${ev.agent_id}<span class="id">${ev.reason} · ${WAKE_EVENT_STATUS_LABELS[ev.status] || ev.status} · ${ev.trigger_id ? `來自 ${ev.trigger_id}` : '手動建立'} · ${ev.created_at}</span></span>
+        ${ev.status === 'pending' ? `<button class="sec small" data-ack="${ev.event_id}">標記已確認</button>` : ''}
+      </div>
+    `).join('');
+    el.querySelectorAll('button[data-ack]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        try {
+          await invoke('ack_wake_event', { event_id: btn.dataset.ack });
+        } catch (e) {
+          console.error(e);
+        }
+        loadWakeEvents();
       });
     });
   } catch (e) {

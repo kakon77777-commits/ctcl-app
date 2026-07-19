@@ -9,7 +9,7 @@ mod local_api;
 mod trigger_engine;
 
 use ctcl_core::{from_ns, now_view, to_ns};
-use ctcl_store::{ActionKind, AuditEntry, DeviceEvent, Operator, Settings, Store, Trigger, TriggerAction, TriggerKind, ALL_SCOPES};
+use ctcl_store::{ActionKind, AuditEntry, DeviceEvent, Operator, Settings, Store, Trigger, TriggerAction, TriggerKind, WakeEvent, WakeEventStatus, ALL_SCOPES};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -176,15 +176,19 @@ struct TriggerInput {
     system_id: Option<String>,
     operator: String,       // ">=" | "<="
     target_value: f64,
-    action_kind: String,    // "notification" | "callback"
-    action_target: String,
+    action_kind: String,    // "notification" | "callback" | "agent_wake"
+    action_target: String,  // notification: message. callback: URI. agent_wake: agent_id.
 }
 
 #[tauri::command]
 fn create_trigger(state: tauri::State<AppState>, input: TriggerInput) -> Result<Trigger, String> {
     let kind = if input.kind == "custom_time" { TriggerKind::CustomTime } else { TriggerKind::CommonInstant };
     let operator = Operator::parse(&input.operator).map_err(|e| e.to_string())?;
-    let action_kind = if input.action_kind == "callback" { ActionKind::Callback } else { ActionKind::Notification };
+    let action_kind = match input.action_kind.as_str() {
+        "callback" => ActionKind::Callback,
+        "agent_wake" => ActionKind::AgentWake,
+        _ => ActionKind::Notification,
+    };
     let action = TriggerAction { kind: action_kind, target: input.action_target };
     state
         .store
@@ -202,6 +206,25 @@ fn list_triggers(state: tauri::State<AppState>) -> Result<Vec<Trigger>, String> 
 #[tauri::command]
 fn cancel_trigger(state: tauri::State<AppState>, id: String) -> Result<Trigger, String> {
     state.store.lock().unwrap().cancel_trigger(&id).map_err(|e| e.to_string())
+}
+
+// ---- WakeEvent Core (Phase 4.5A) -------------------------------------------
+
+// rename_all=snake_case so the JS side passes agent_id/event_id verbatim,
+// same explicit-match discipline as create_system - these are multi-word
+// top-level command params, which Tauri's default IPC naming would otherwise
+// silently expect as agentId/eventId instead.
+#[tauri::command(rename_all = "snake_case")]
+fn list_wake_events(state: tauri::State<AppState>, agent_id: Option<String>, status: Option<String>) -> Result<Vec<WakeEvent>, String> {
+    // reuses WakeEventStatus's own serde mapping instead of a second,
+    // hand-duplicated string->variant table (same trick as local_api.rs).
+    let status = status.and_then(|s| serde_json::from_str::<WakeEventStatus>(&format!("\"{s}\"")).ok());
+    state.store.lock().unwrap().list_wake_events(agent_id.as_deref(), status).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn ack_wake_event(state: tauri::State<AppState>, event_id: String) -> Result<WakeEvent, String> {
+    state.store.lock().unwrap().ack_wake_event(&event_id).map_err(|e| e.to_string())
 }
 
 /// Ensure the running local API (if any) matches current settings - start it
@@ -295,6 +318,8 @@ fn main() {
             create_trigger,
             list_triggers,
             cancel_trigger,
+            list_wake_events,
+            ack_wake_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the CTCL Temporal Port app");

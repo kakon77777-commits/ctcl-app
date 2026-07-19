@@ -60,6 +60,12 @@ impl Operator {
 pub enum ActionKind {
     Notification,
     Callback,
+    /// Agent Wake (whitepaper §7 of CTCL_Agent_Wake_MCP_Temporal_Runtime):
+    /// instead of an OS-level dispatch, produces a persisted WakeEvent for an
+    /// external Agent Runtime to pick up. CTCL deliberately does NOT call MCP
+    /// tools directly from here - see device_observer.rs's dispatcher for why
+    /// that boundary matters (this is the same discipline, one level up).
+    AgentWake,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,7 +74,10 @@ pub struct TriggerAction {
     /// notification: the message to show. callback: the URI to open (the OS's
     /// default handler for that scheme decides what happens next - CTCL does
     /// not register or resolve schemes itself, matching §7.1's "private
-    /// scheme only, no protocol handler" scope for this phase).
+    /// scheme only, no protocol handler" scope for this phase). agent_wake:
+    /// the agent_id to wake (e.g. "agent:primary") - CTCL does not validate
+    /// that any such agent is registered; it's an opaque routing label until
+    /// Agent Endpoints (a later phase) exist.
     pub target: String,
 }
 

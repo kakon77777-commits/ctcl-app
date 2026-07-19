@@ -54,7 +54,7 @@ desktop-first, not a rewrite of the hosted API.
 
 ```bash
 cargo build
-cargo test               # 64 tests across ctcl-core + ctcl-store + ctcl-desktop
+cargo test               # 79 tests across ctcl-core + ctcl-store + ctcl-desktop
 cargo run --bin ctcl -- now
 cargo run --bin ctcl -- convert --value 1783420000.5 --from unix_s --to rfc3339 --tz Asia/Taipei
 cargo run --bin ctcl -- serve                       # opens a browser, no terminal needed after this
@@ -168,7 +168,44 @@ side passes `epoch_parent_sec` verbatim, so there's no implicit-conversion
 assumption to get wrong, matching the explicit-match discipline
 `create_trigger`'s struct argument already required.
 
-Still to come: Phase 5 (team sync — note this needs an actual sync-backend
+**Phase 4.5A (WakeEvent Core) shipped 2026-07-19**, per the
+[CTCL Agent Wake & MCP Temporal Runtime whitepaper](../CTCL/docs/CTCL_Agent_Wake_MCP_Temporal_Runtime_技術白皮書_v0.1.md)'s
+own staged roadmap — its recommended starting slice, ahead of Recurrence, the
+Local MCP server, Remote MCP, and every later phase, all deliberately deferred.
+The whitepaper's central discipline, `Wake ≠ Act`: CTCL's job stops at
+reliably recording that an `agent_wake` trigger fired and letting an external
+Agent Runtime retrieve/acknowledge that — it never calls an MCP tool or any
+other action on the agent's behalf. A new `ActionKind::AgentWake` variant
+(alongside `notification`/`callback`) is intercepted by
+`trigger_engine.rs::evaluate_once` *before* reaching `ActionDispatcher` at all
+— it never does OS-level I/O — and instead calls
+`ctcl_store::wake_event::Store::create_wake_event_from_trigger`, which persists
+a `WakeEvent` (`event_id`, `trigger_id`, `agent_id`, `reason`, `fired`,
+`observed`, `payload`, `status`, `idempotency_key`) to a new `wake_events`
+table. Idempotency key is `trigger-fire:{id}:{created_at}`, stable across
+retries of the same arming (e.g. a crash between dispatch and `mark_fired`)
+but distinct after a rearm, since re-registering a trigger always stamps a
+fresh `created_at`. Status starts `pending`; Phase 4.5A implements only manual
+`ack` (`pending → acknowledged`, one-way) — delivery, decision receipts, and
+the later `delivering`/`delivered`/`decided_*`/`completed`/`retry_wait`/
+`dead_letter` states from the whitepaper's full state machine are not built
+yet, matching its own phased scope. Exposed the same three consistent ways as
+every prior phase: Tauri commands (`list_wake_events`/`ack_wake_event`,
+explicitly `rename_all = "snake_case"` for the same multi-word-argument reason
+as `create_system`), a Local API route pair (`GET /v1/wake-events?agent_id=&status=`
+and `POST /v1/wake-events/{id}/ack`, gated by two new off-by-default scopes
+`wake_events.read`/`wake_events.ack` — same "off by default" discipline as
+every other write/read-sensitive scope since Phase 2), and a Settings card
+(live list + "標記已確認" ack buttons). 15 new tests: 9 in `ctcl-store`
+(`wake_event.rs`, including duplicate-idempotency-key and both trigger kinds),
+2 in `trigger_engine.rs` (AgentWake bypasses `ActionDispatcher`; a
+misdirected AgentWake action reaching `RealDispatcher` fails loudly instead of
+silently no-op'ing), 4 in `local_api.rs` (scope gating + query-param
+filtering + the ack transition, real socket-level as always).
+
+Still to come: Phase 4.5B (Poll-only Bridge) and later phases from the Agent
+Wake whitepaper, and — unrelated, paused per Neo's direction while this took
+priority — Phase 5 (team sync — note this needs an actual sync-backend
 *product* decision, e.g. self-hosted vs. hub on commoninstant.org vs. a new
 paid tier, not just more local Rust code, so it's being left for Neo to weigh
 in on rather than architected unilaterally) and Phase 6 (mobile companion,

@@ -26,6 +26,8 @@ pub const ALL_SCOPES: &[&str] = &[
     "triggers.write",
     "device_clock.read",
     "history.read",
+    "wake_events.read",
+    "wake_events.ack",
 ];
 
 /// §12.2 "Granted Capability -> min": only low-risk read/execute scopes are
@@ -113,6 +115,7 @@ impl Settings {
             FeatureStatus { key: "audit_log", phase: "Phase 2", implemented: true },
             FeatureStatus { key: "device_clock_observer", phase: "Phase 3", implemented: true },
             FeatureStatus { key: "triggers", phase: "Phase 4", implemented: true },
+            FeatureStatus { key: "wake_events", phase: "Phase 4.5A", implemented: true },
             FeatureStatus { key: "encrypted_storage", phase: "\u{00a7}12.3", implemented: false },
             FeatureStatus { key: "retention_policy", phase: "\u{00a7}12.3", implemented: false },
         ]

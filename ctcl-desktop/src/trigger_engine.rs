@@ -8,6 +8,13 @@
 //! A trigger is marked fired ONLY after a successful dispatch - if opening a
 //! callback URI fails, the trigger stays active and is retried next tick,
 //! rather than being silently marked "fired" without the action happening.
+//!
+//! `ActionKind::AgentWake` is a special case (whitepaper
+//! CTCL_Agent_Wake_MCP_Temporal_Runtime §7, Phase 4.5A): it never reaches
+//! `ActionDispatcher` at all. `evaluate_once` intercepts it before dispatch
+//! and calls `Store::create_wake_event_from_trigger` directly, so a due
+//! agent_wake trigger produces a persisted WakeEvent instead of OS-level I/O.
+//! Same "mark fired only on success" retry semantics apply either way.
 
 use ctcl_store::{ActionKind, Store, Trigger, TriggerAction};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +41,11 @@ impl ActionDispatcher for RealDispatcher {
                 Ok(())
             }
             ActionKind::Callback => open_uri(&action.target),
+            // Intercepted earlier in evaluate_once() and never dispatched
+            // here - see this module's top doc comment. If this arm is ever
+            // reached it's a bug in that interception, so fail loudly rather
+            // than silently no-op'ing or opening a URI for an agent id.
+            ActionKind::AgentWake => Err("agent_wake actions are handled by the trigger engine directly, not ActionDispatcher".to_string()),
         }
     }
 }
@@ -92,7 +104,15 @@ fn evaluate_once(store: &Mutex<Store>, dispatcher: &dyn ActionDispatcher, now_s:
     };
     let mut fired = Vec::new();
     for t in due {
-        if dispatcher.dispatch(&t.action).is_ok() {
+        let dispatched_ok = if t.action.kind == ActionKind::AgentWake {
+            match store.lock() {
+                Ok(s) => s.create_wake_event_from_trigger(&t, now_s).is_ok(),
+                Err(_) => false,
+            }
+        } else {
+            dispatcher.dispatch(&t.action).is_ok()
+        };
+        if dispatched_ok {
             if let Ok(s) = store.lock() {
                 let _ = s.mark_fired(&t.id);
             }
@@ -190,6 +210,31 @@ mod tests {
             ctcl_store::TriggerStatus::Active,
             "must stay active so it retries next tick rather than being silently lost"
         );
+    }
+
+    #[test]
+    fn a_due_agent_wake_trigger_creates_a_wake_event_instead_of_dispatching() {
+        let store = Mutex::new(Store::open(":memory:").unwrap());
+        let action = TriggerAction { kind: ActionKind::AgentWake, target: "agent:primary".to_string() };
+        store.lock().unwrap().create_trigger("t", TriggerKind::CommonInstant, None, Operator::Ge, 100.0, action).unwrap();
+
+        let dispatcher = FakeDispatcher::new();
+        let fired = evaluate_once(&store, &dispatcher, 150.0);
+
+        assert_eq!(fired.len(), 1);
+        assert!(dispatcher.calls.lock().unwrap().is_empty(), "agent_wake must never reach ActionDispatcher");
+        assert_eq!(store.lock().unwrap().get_trigger("t").unwrap().status, ctcl_store::TriggerStatus::Fired);
+
+        let events = store.lock().unwrap().list_wake_events(Some("agent:primary"), None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].trigger_id.as_deref(), Some("t"));
+        assert_eq!(events[0].status, ctcl_store::WakeEventStatus::Pending);
+    }
+
+    #[test]
+    fn real_dispatcher_rejects_agent_wake_if_it_is_ever_reached_directly() {
+        let action = TriggerAction { kind: ActionKind::AgentWake, target: "agent:primary".to_string() };
+        assert!(RealDispatcher.dispatch(&action).is_err(), "AgentWake reaching the dispatcher directly is an invariant violation, not a silent no-op");
     }
 
     #[test]
