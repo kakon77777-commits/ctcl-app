@@ -54,7 +54,7 @@ desktop-first, not a rewrite of the hosted API.
 
 ```bash
 cargo build
-cargo test               # 79 tests across ctcl-core + ctcl-store + ctcl-desktop
+cargo test               # 93 tests across ctcl-core + ctcl-store + ctcl-desktop
 cargo run --bin ctcl -- now
 cargo run --bin ctcl -- convert --value 1783420000.5 --from unix_s --to rfc3339 --tz Asia/Taipei
 cargo run --bin ctcl -- serve                       # opens a browser, no terminal needed after this
@@ -203,13 +203,65 @@ misdirected AgentWake action reaching `RealDispatcher` fails loudly instead of
 silently no-op'ing), 4 in `local_api.rs` (scope gating + query-param
 filtering + the ack transition, real socket-level as always).
 
-Still to come: Phase 4.5B (Poll-only Bridge) and later phases from the Agent
-Wake whitepaper, and — unrelated, paused per Neo's direction while this took
-priority — Phase 5 (team sync — note this needs an actual sync-backend
-*product* decision, e.g. self-hosted vs. hub on commoninstant.org vs. a new
-paid tier, not just more local Rust code, so it's being left for Neo to weigh
-in on rather than architected unilaterally) and Phase 6 (mobile companion,
-explicitly last per the whitepaper's own ordering).
+**Phase 4.5B (Poll-only Bridge) shipped 2026-07-19**, the whitepaper's own
+next-recommended slice (§9.3: "the easiest and most reliable MVP" delivery
+mode — an external Agent Runtime polls CTCL rather than CTCL pushing to it,
+so no Agent Endpoint registry, no HTTP callback, no retry/dead-letter logic is
+needed yet; those are Phase 4.5D). Closes the loop §9.3/§10/§23 actually
+asked for: an Agent Runtime can now poll pending WakeEvents, ack one, do its
+work, file a decision receipt, mark the event complete, and schedule its own
+next wake — entirely over the Local API, without the desktop UI in the loop.
+- **`wake_events.completed_at` + `Store::complete_wake_event`**: `acknowledged
+  → completed`, same one-way-transition discipline as `ack_wake_event` (and
+  deliberately requires a prior ack — completing straight from `pending` would
+  mean "completed" no longer implies an Agent Runtime actually saw it).
+- **New `decision_receipts` table + `decision_receipt.rs`** (whitepaper §6.3):
+  `Store::create_decision_receipt` (validates `decision` is `no_action` or
+  `action` — not an open string — and that the target WakeEvent exists) and
+  `Store::get_latest_decision_receipt`. CTCL never reads `decision` to decide
+  anything itself — a receipt is filed, not acted on, the same boundary as
+  `ActionKind::AgentWake` itself. The schema allows multiple receipts per
+  event (matching §6.3 exactly, no invented UNIQUE constraint); the API
+  surfaces the most recent.
+- **Local API Trigger write** (§10.1, previously Tauri-only): `POST
+  /v1/triggers` (create — reuses the existing "re-post rearms" convention, so
+  no separate `/rearm` endpoint), `POST /v1/triggers/{id}/cancel`, `GET
+  /v1/triggers/{id}`. This is what actually lets an Agent Runtime "self-
+  schedule its next wake" (§23/§25's `schedule_next_wake_if_needed`) — CTCL
+  doesn't read a receipt's `next_wake` field and act on it; the agent calls
+  this endpoint itself, same non-coupling discipline as everywhere else here.
+- **WakeEvent complete + Decision Receipt Local API routes** (§10.2/§10.4):
+  `POST /v1/wake-events/{id}/complete`, `POST`+`GET
+  /v1/wake-events/{id}/decision`, plus a single-item `GET
+  /v1/wake-events/{id}` that Phase 4.5A hadn't added (list-only).
+- **Three new off-by-default capability scopes**: `triggers.cancel` (kept
+  separate from `triggers.write`, per the whitepaper's own §11 scope list),
+  `wake_events.complete`, `decision_receipts.write` — "all side-effecting
+  capabilities default off" (§11), same policy as every scope added since
+  Phase 2, even where the whitepaper's own suggested default differs (it
+  suggests `triggers.read`/`wake_events.read` on by default; this project
+  keeps them off, for consistency with `device_clock.read`/`history.read`
+  rather than re-litigating that choice per scope).
+- Settings card gained a "標記完成" (mark complete) button for acknowledged
+  WakeEvents, and shows the latest decision receipt's decision + summary
+  inline when one exists — read-only, since authoring a receipt (run_id, tool
+  calls, cost data) is an Agent Runtime's job, not something a human types
+  into a form.
+- 24 new tests: 5 in `decision_receipt.rs`, 3 in `wake_event.rs`
+  (`complete_wake_event`'s transition + its two rejection paths), 16 in
+  `local_api.rs` (every new route, each scope-gated then verified to succeed
+  once granted, real socket-level as always) — **93 tests total** across the
+  workspace, `cargo build --workspace` (full link, not just `check`) clean.
+
+Still to come: Phase 4.5C (Local MCP server, `stdio` transport) and 4.5D
+(Active Delivery — loopback HTTP/local-process push, retry, dead-letter, an
+Agent Endpoint registry) from the Agent Wake whitepaper, and — unrelated,
+still paused per Neo's direction while this took priority — Phase 5 (team
+sync — note this needs an actual sync-backend *product* decision, e.g.
+self-hosted vs. hub on commoninstant.org vs. a new paid tier, not just more
+local Rust code, so it's being left for Neo to weigh in on rather than
+architected unilaterally) and Phase 6 (mobile companion, explicitly last per
+the whitepaper's own ordering).
 
 This is intentionally **not** trying to replicate CTCL Web's whole surface at
 once — it starts from the same core math and grows outward, same as the Worker

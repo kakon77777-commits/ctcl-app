@@ -64,8 +64,15 @@ fn required_scope(method: &Method, path: &str) -> Option<&'static str> {
         (Method::Get, "/v1/audit") => Some("history.read"),
         (Method::Get, "/v1/device-events") => Some("device_clock.read"),
         (Method::Get, "/v1/triggers") => Some("triggers.read"),
+        (Method::Get, p) if p.starts_with("/v1/triggers/") => Some("triggers.read"),
+        (Method::Post, "/v1/triggers") => Some("triggers.write"),
+        (Method::Post, p) if p.starts_with("/v1/triggers/") && p.ends_with("/cancel") => Some("triggers.cancel"),
         (Method::Get, "/v1/wake-events") => Some("wake_events.read"),
         (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/ack") => Some("wake_events.ack"),
+        (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/complete") => Some("wake_events.complete"),
+        (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/decision") => Some("decision_receipts.write"),
+        // covers both GET /v1/wake-events/{id} and GET /v1/wake-events/{id}/decision - both are reads.
+        (Method::Get, p) if p.starts_with("/v1/wake-events/") => Some("wake_events.read"),
         _ => None,
     }
 }
@@ -151,6 +158,50 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
             Ok(triggers) => respond_ok(request, json!({ "triggers": triggers })),
             Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
         },
+        // §10.1 Trigger write API - lets an external Agent Runtime create and
+        // cancel its own triggers over the loopback API, not just the desktop
+        // UI. Re-posting an existing id rearms it (create_trigger's existing
+        // convention), so no separate /rearm endpoint is needed.
+        (Method::Post, "/v1/triggers") => {
+            let id = json_body.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let kind = if json_body.get("kind").and_then(|v| v.as_str()) == Some("custom_time") {
+                ctcl_store::TriggerKind::CustomTime
+            } else {
+                ctcl_store::TriggerKind::CommonInstant
+            };
+            let system_id = json_body.get("system_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let operator_str = json_body.get("operator").and_then(|v| v.as_str()).unwrap_or(">=");
+            let target_value = json_body.get("target_value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let action_kind = match json_body.get("action_kind").and_then(|v| v.as_str()) {
+                Some("callback") => ctcl_store::ActionKind::Callback,
+                Some("agent_wake") => ctcl_store::ActionKind::AgentWake,
+                _ => ctcl_store::ActionKind::Notification,
+            };
+            let action_target = json_body.get("action_target").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let operator = match ctcl_store::Operator::parse(operator_str) {
+                Ok(o) => o,
+                Err(e) => return respond_error(request, 400, e.code(), &e.to_string()),
+            };
+            let action = ctcl_store::TriggerAction { kind: action_kind, target: action_target };
+            match store.lock().unwrap().create_trigger(&id, kind, system_id.as_deref(), operator, target_value, action) {
+                Ok(t) => respond_ok(request, json!(t)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Post, p) if p.starts_with("/v1/triggers/") && p.ends_with("/cancel") => {
+            let id = &p["/v1/triggers/".len()..p.len() - "/cancel".len()];
+            match store.lock().unwrap().cancel_trigger(id) {
+                Ok(t) => respond_ok(request, json!(t)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Get, p) if p.starts_with("/v1/triggers/") => {
+            let id = &p["/v1/triggers/".len()..];
+            match store.lock().unwrap().get_trigger(id) {
+                Ok(t) => respond_ok(request, json!(t)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
         (Method::Get, "/v1/wake-events") => {
             let agent_id = query_param(&query, "agent_id");
             // reuses WakeEventStatus's own serde mapping instead of a second,
@@ -164,6 +215,45 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
         (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/ack") => {
             let id = &p["/v1/wake-events/".len()..p.len() - "/ack".len()];
             match store.lock().unwrap().ack_wake_event(id) {
+                Ok(ev) => respond_ok(request, json!(ev)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/complete") => {
+            let id = &p["/v1/wake-events/".len()..p.len() - "/complete".len()];
+            match store.lock().unwrap().complete_wake_event(id) {
+                Ok(ev) => respond_ok(request, json!(ev)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        // §10.4 Decision Receipt API - the Agent Runtime's own report of what
+        // it decided (no_action | action), never inspected or acted on by
+        // CTCL itself - see decision_receipt.rs's own doc comment.
+        (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/decision") => {
+            let id = &p["/v1/wake-events/".len()..p.len() - "/decision".len()];
+            let agent_id = json_body.get("agent_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let run_id = json_body.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let decision = json_body.get("decision").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let summary = json_body.get("summary").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let tool_calls = json_body.get("tool_calls").cloned();
+            let next_wake = json_body.get("next_wake").cloned();
+            let cost = json_body.get("cost").cloned();
+            match store.lock().unwrap().create_decision_receipt(id, &agent_id, &run_id, &decision, summary.as_deref(), tool_calls, next_wake, cost) {
+                Ok(r) => respond_ok(request, json!(r)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Get, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/decision") => {
+            let id = &p["/v1/wake-events/".len()..p.len() - "/decision".len()];
+            match store.lock().unwrap().get_latest_decision_receipt(id) {
+                Ok(Some(r)) => respond_ok(request, json!(r)),
+                Ok(None) => respond_error(request, 404, "NOT_FOUND", "no decision receipt filed yet for this wake event"),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Get, p) if p.starts_with("/v1/wake-events/") => {
+            let id = &p["/v1/wake-events/".len()..];
+            match store.lock().unwrap().get_wake_event(id) {
                 Ok(ev) => respond_ok(request, json!(ev)),
                 Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
             }
@@ -359,6 +449,126 @@ mod tests {
         assert_eq!(allowed.status, 200);
         assert!(allowed.body.contains("\"acknowledged\""));
         assert_eq!(store.lock().unwrap().get_wake_event(&ev.event_id).unwrap().status, ctcl_store::WakeEventStatus::Acknowledged);
+    }
+
+    #[test]
+    fn trigger_write_api_creates_reads_and_cancels() {
+        let (store, _handle) = test_store_with_token(4512, "secret-token");
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("triggers.write".to_string(), true);
+        settings.scopes.insert("triggers.read".to_string(), true);
+        settings.scopes.insert("triggers.cancel".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let refused = raw_request(4512, "POST", "/v1/triggers", None, "{}");
+        assert_eq!(refused.status, 401, "still needs a valid bearer token even with scopes granted");
+
+        let body = r#"{"id":"trigger:api-created","kind":"common_instant","operator":">=","target_value":100,"action_kind":"agent_wake","action_target":"agent:primary"}"#;
+        let created = raw_request(4512, "POST", "/v1/triggers", Some("secret-token"), body);
+        assert_eq!(created.status, 200, "body: {}", created.body);
+        assert!(created.body.contains("\"agent_wake\""));
+
+        let read = raw_request(4512, "GET", "/v1/triggers/trigger:api-created", Some("secret-token"), "");
+        assert_eq!(read.status, 200);
+        assert!(read.body.contains("\"active\""));
+
+        let cancelled = raw_request(4512, "POST", "/v1/triggers/trigger:api-created/cancel", Some("secret-token"), "");
+        assert_eq!(cancelled.status, 200);
+        assert_eq!(store.lock().unwrap().get_trigger("trigger:api-created").unwrap().status, ctcl_store::TriggerStatus::Cancelled);
+    }
+
+    #[test]
+    fn trigger_write_and_cancel_are_separately_scope_gated() {
+        let (_store, _handle) = test_store_with_token(4513, "secret-token");
+        let create_refused = raw_request(4513, "POST", "/v1/triggers", Some("secret-token"), "{}");
+        assert_eq!(create_refused.status, 403, "triggers.write is off by default");
+
+        let cancel_refused = raw_request(4513, "POST", "/v1/triggers/some-id/cancel", Some("secret-token"), "");
+        assert_eq!(cancel_refused.status, 403, "triggers.cancel is off by default, separately from triggers.write");
+    }
+
+    #[test]
+    fn wake_event_single_item_read_route() {
+        let (store, _handle) = test_store_with_token(4514, "secret-token");
+        let ev = store.lock().unwrap().create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("wake_events.read".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let refused_status = raw_request(4514, "GET", &format!("/v1/wake-events/{}", ev.event_id), None, "");
+        assert_eq!(refused_status.status, 401);
+
+        let allowed = raw_request(4514, "GET", &format!("/v1/wake-events/{}", ev.event_id), Some("secret-token"), "");
+        assert_eq!(allowed.status, 200);
+        assert!(allowed.body.contains("agent:primary"));
+
+        let unknown = raw_request(4514, "GET", "/v1/wake-events/wake:does-not-exist", Some("secret-token"), "");
+        assert_eq!(unknown.status, 400);
+    }
+
+    #[test]
+    fn wake_event_complete_requires_prior_ack_and_is_scope_gated() {
+        let (store, _handle) = test_store_with_token(4515, "secret-token");
+        let ev = store.lock().unwrap().create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+
+        let refused = raw_request(4515, "POST", &format!("/v1/wake-events/{}/complete", ev.event_id), Some("secret-token"), "");
+        assert_eq!(refused.status, 403, "wake_events.complete is off by default");
+
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("wake_events.complete".to_string(), true);
+        settings.scopes.insert("wake_events.ack".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let too_early = raw_request(4515, "POST", &format!("/v1/wake-events/{}/complete", ev.event_id), Some("secret-token"), "");
+        assert_eq!(too_early.status, 400, "must not complete before acknowledging");
+
+        raw_request(4515, "POST", &format!("/v1/wake-events/{}/ack", ev.event_id), Some("secret-token"), "");
+        let completed = raw_request(4515, "POST", &format!("/v1/wake-events/{}/complete", ev.event_id), Some("secret-token"), "");
+        assert_eq!(completed.status, 200);
+        assert_eq!(store.lock().unwrap().get_wake_event(&ev.event_id).unwrap().status, ctcl_store::WakeEventStatus::Completed);
+    }
+
+    #[test]
+    fn decision_receipt_write_and_read_round_trip_over_http() {
+        let (store, _handle) = test_store_with_token(4516, "secret-token");
+        let ev = store.lock().unwrap().create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+
+        let refused = raw_request(4516, "GET", &format!("/v1/wake-events/{}/decision", ev.event_id), Some("secret-token"), "");
+        assert_eq!(refused.status, 403, "reading a decision receipt still needs wake_events.read");
+
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("wake_events.read".to_string(), true);
+        settings.scopes.insert("decision_receipts.write".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let none_yet = raw_request(4516, "GET", &format!("/v1/wake-events/{}/decision", ev.event_id), Some("secret-token"), "");
+        assert_eq!(none_yet.status, 404, "no receipt filed yet");
+
+        let write_refused = raw_request(4516, "POST", &format!("/v1/wake-events/{}/decision", ev.event_id), None, "{}");
+        assert_eq!(write_refused.status, 401);
+
+        let body = r#"{"agent_id":"agent:primary","run_id":"run:01J","decision":"no_action","summary":"nothing to do","next_wake":{"kind":"relative","after_seconds":3600}}"#;
+        let written = raw_request(4516, "POST", &format!("/v1/wake-events/{}/decision", ev.event_id), Some("secret-token"), body);
+        assert_eq!(written.status, 200, "body: {}", written.body);
+        assert!(written.body.contains("no_action"));
+
+        let read = raw_request(4516, "GET", &format!("/v1/wake-events/{}/decision", ev.event_id), Some("secret-token"), "");
+        assert_eq!(read.status, 200);
+        assert!(read.body.contains("nothing to do"));
+        assert!(read.body.contains("3600"));
+    }
+
+    #[test]
+    fn decision_receipt_rejects_invalid_decision_value_over_http() {
+        let (store, _handle) = test_store_with_token(4517, "secret-token");
+        let ev = store.lock().unwrap().create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("decision_receipts.write".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let body = r#"{"agent_id":"agent:primary","run_id":"run:1","decision":"maybe"}"#;
+        let r = raw_request(4517, "POST", &format!("/v1/wake-events/{}/decision", ev.event_id), Some("secret-token"), body);
+        assert_eq!(r.status, 400);
     }
 
     #[test]

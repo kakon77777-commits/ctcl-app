@@ -227,6 +227,21 @@ fn ack_wake_event(state: tauri::State<AppState>, event_id: String) -> Result<Wak
     state.store.lock().unwrap().ack_wake_event(&event_id).map_err(|e| e.to_string())
 }
 
+// ---- Phase 4.5B: complete + decision receipts (read-only in this UI) ------
+
+#[tauri::command(rename_all = "snake_case")]
+fn complete_wake_event(state: tauri::State<AppState>, event_id: String) -> Result<WakeEvent, String> {
+    state.store.lock().unwrap().complete_wake_event(&event_id).map_err(|e| e.to_string())
+}
+
+/// Authoring a decision receipt is an Agent Runtime's job (run_id, tool
+/// calls, cost data aren't things a human types into a form) - this UI only
+/// ever reads one back, over the Local API is where an agent writes them.
+#[tauri::command(rename_all = "snake_case")]
+fn get_decision_receipt(state: tauri::State<AppState>, event_id: String) -> Result<Option<ctcl_store::DecisionReceipt>, String> {
+    state.store.lock().unwrap().get_latest_decision_receipt(&event_id).map_err(|e| e.to_string())
+}
+
 /// Ensure the running local API (if any) matches current settings - start it
 /// if now enabled, stop it if now disabled, restart it if the port changed.
 fn sync_local_api(state: &tauri::State<AppState>, settings: &Settings) {
@@ -320,6 +335,8 @@ fn main() {
             cancel_trigger,
             list_wake_events,
             ack_wake_event,
+            complete_wake_event,
+            get_decision_receipt,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the CTCL Temporal Port app");

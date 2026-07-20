@@ -7,6 +7,7 @@
 
 mod error;
 pub mod audit;
+pub mod decision_receipt;
 pub mod device_observer;
 pub mod group;
 pub mod instant;
@@ -16,6 +17,7 @@ pub mod trigger;
 pub mod wake_event;
 
 pub use audit::AuditEntry;
+pub use decision_receipt::DecisionReceipt;
 pub use device_observer::{DeviceEvent, EventKind};
 pub use error::StoreError;
 pub use group::GroupRecord;
@@ -111,7 +113,20 @@ impl Store {
                 attempt_count     INTEGER NOT NULL DEFAULT 0,
                 created_at        TEXT NOT NULL,
                 acknowledged_at   TEXT,
+                completed_at      TEXT,
                 idempotency_key   TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS decision_receipts (
+                receipt_id      TEXT PRIMARY KEY,
+                event_id        TEXT NOT NULL,
+                agent_id        TEXT NOT NULL,
+                run_id          TEXT NOT NULL,
+                decision        TEXT NOT NULL,
+                summary         TEXT,
+                tool_calls_json TEXT,
+                next_wake_json  TEXT,
+                cost_json       TEXT,
+                created_at      TEXT NOT NULL
             );
             ",
         )?;

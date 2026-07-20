@@ -368,12 +368,16 @@ const SCOPE_LABELS = {
   "history.read": "讀取稽核歷史",
   "wake_events.read": "讀取 WakeEvents（Agent 喚醒紀錄）",
   "wake_events.ack": "標記 WakeEvent 已確認收到",
+  "triggers.cancel": "取消觸發器（透過本機 API，與建立分開授權）",
+  "wake_events.complete": "標記 WakeEvent 已完成",
+  "decision_receipts.write": "寫入決策回執（Agent 回報它做了什麼決定）",
 };
 const FEATURE_LABELS = {
   local_api: "本機 API", scopes: "權限範圍", audit_log: "稽核紀錄",
   device_clock_observer: "裝置時鐘觀測（睡眠喚醒、漂移偵測）",
   triggers: "背景觸發器（時間到了自動做某件事）",
   wake_events: "WakeEvents（觸發器喚醒 Agent 的紀錄，不含實際行動）",
+  decision_receipts: "決策回執（Agent 事後回報它決定了什麼，CTCL 不會據此自動採取行動）",
   encrypted_storage: "本機資料加密儲存",
   retention_policy: "資料保留天數（自動清除舊紀錄）",
 };
@@ -537,6 +541,7 @@ const WAKE_EVENT_STATUS_LABELS = {
   decided_no_action: '已決定不行動', decided_action: '已決定行動', completed: '已完成',
   retry_wait: '等待重試', dead_letter: '已放棄（死信）',
 };
+const DECISION_LABELS = { no_action: '不需行動', action: '已採取行動' };
 
 document.getElementById('createTrigger').addEventListener('click', async () => {
   const errEl = document.getElementById('triggerErr');
@@ -607,16 +612,43 @@ async function loadWakeEvents() {
     const events = await invoke('list_wake_events', { agent_id: null, status: null });
     const el = document.getElementById('wakeEventsList');
     if (!events.length) { el.innerHTML = '<div class="audit-empty">還沒有 WakeEvent</div>'; return; }
-    el.innerHTML = events.map((ev) => `
-      <div class="row-line">
-        <span class="lbl">${ev.agent_id}<span class="id">${ev.reason} · ${WAKE_EVENT_STATUS_LABELS[ev.status] || ev.status} · ${ev.trigger_id ? `來自 ${ev.trigger_id}` : '手動建立'} · ${ev.created_at}</span></span>
+
+    // Decision receipts are only meaningful once an Agent Runtime has had a
+    // chance to file one - skip the lookup for still-pending events.
+    const receipts = await Promise.all(events.map((ev) =>
+      (ev.status === 'acknowledged' || ev.status === 'completed')
+        ? invoke('get_decision_receipt', { event_id: ev.event_id }).catch(() => null)
+        : Promise.resolve(null)
+    ));
+
+    el.innerHTML = events.map((ev, i) => {
+      const receipt = receipts[i];
+      const receiptLine = receipt
+        ? `<div class="mono-small" style="margin-top:.2rem;color:var(--faint)">決策：${DECISION_LABELS[receipt.decision] || receipt.decision}${receipt.summary ? ' - ' + receipt.summary : ''}</div>`
+        : '';
+      return `
+      <div class="row-line" style="flex-wrap:wrap">
+        <span class="lbl">${ev.agent_id}<span class="id">${ev.reason} · ${WAKE_EVENT_STATUS_LABELS[ev.status] || ev.status} · ${ev.trigger_id ? `來自 ${ev.trigger_id}` : '手動建立'} · ${ev.created_at}</span>${receiptLine}</span>
         ${ev.status === 'pending' ? `<button class="sec small" data-ack="${ev.event_id}">標記已確認</button>` : ''}
+        ${ev.status === 'acknowledged' ? `<button class="sec small" data-complete="${ev.event_id}">標記完成</button>` : ''}
       </div>
-    `).join('');
+    `;
+    }).join('');
+
     el.querySelectorAll('button[data-ack]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         try {
           await invoke('ack_wake_event', { event_id: btn.dataset.ack });
+        } catch (e) {
+          console.error(e);
+        }
+        loadWakeEvents();
+      });
+    });
+    el.querySelectorAll('button[data-complete]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        try {
+          await invoke('complete_wake_event', { event_id: btn.dataset.complete });
         } catch (e) {
           console.error(e);
         }

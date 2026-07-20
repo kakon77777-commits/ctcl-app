@@ -79,6 +79,7 @@ pub struct WakeEvent {
     pub attempt_count: i64,
     pub created_at: String,
     pub acknowledged_at: Option<String>,
+    pub completed_at: Option<String>,
     pub idempotency_key: String,
 }
 
@@ -113,8 +114,8 @@ impl Store {
             return Ok(ev);
         }
         self.conn.execute(
-            "INSERT INTO wake_events (event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, idempotency_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, ?8, NULL, ?9)",
+            "INSERT INTO wake_events (event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, idempotency_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, ?8, NULL, NULL, ?9)",
             rusqlite::params![event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, created_at, idempotency_key],
         )?;
         self.get_wake_event(&event_id)
@@ -123,7 +124,7 @@ impl Store {
     pub fn get_wake_event(&self, event_id: &str) -> Result<WakeEvent, StoreError> {
         self.conn
             .query_row(
-                "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, idempotency_key
+                "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, idempotency_key
                  FROM wake_events WHERE event_id = ?1",
                 [event_id],
                 Self::row_to_wake_event,
@@ -133,7 +134,7 @@ impl Store {
 
     fn get_wake_event_by_idempotency_key(&self, key: &str) -> Result<Option<WakeEvent>, StoreError> {
         let result = self.conn.query_row(
-            "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, idempotency_key
+            "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, idempotency_key
              FROM wake_events WHERE idempotency_key = ?1",
             [key],
             Self::row_to_wake_event,
@@ -149,7 +150,7 @@ impl Store {
     /// optional (§10.2's `GET /v1/wake-events?status=pending&agent_id=...`).
     pub fn list_wake_events(&self, agent_id: Option<&str>, status: Option<WakeEventStatus>) -> Result<Vec<WakeEvent>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, idempotency_key
+            "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, idempotency_key
              FROM wake_events ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], Self::row_to_wake_event)?.collect::<Result<Vec<_>, rusqlite::Error>>()?;
@@ -176,6 +177,27 @@ impl Store {
             let existing = self.get_wake_event(event_id)?;
             return Err(StoreError::InvalidInput(format!(
                 "cannot acknowledge wake event {event_id}: status is '{}', not 'pending'",
+                existing.status.as_str()
+            )));
+        }
+        self.get_wake_event(event_id)
+    }
+
+    /// Phase 4.5B (§10.2 `POST /v1/wake-events/{event_id}/complete`):
+    /// acknowledged -> completed only, same one-way-transition discipline as
+    /// `ack_wake_event`. Requires a prior ack rather than completing straight
+    /// from `pending` - the whitepaper's own state chain is
+    /// pending->...->acknowledged->...->completed, and skipping ack would mean
+    /// "completed" no longer implies "some Agent Runtime actually saw this."
+    pub fn complete_wake_event(&self, event_id: &str) -> Result<WakeEvent, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE wake_events SET status='completed', completed_at=?1 WHERE event_id=?2 AND status='acknowledged'",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), event_id],
+        )?;
+        if changed == 0 {
+            let existing = self.get_wake_event(event_id)?;
+            return Err(StoreError::InvalidInput(format!(
+                "cannot complete wake event {event_id}: status is '{}', not 'acknowledged'",
                 existing.status.as_str()
             )));
         }
@@ -234,7 +256,8 @@ impl Store {
         let attempt_count: i64 = row.get(8)?;
         let created_at: String = row.get(9)?;
         let acknowledged_at: Option<String> = row.get(10)?;
-        let idempotency_key: String = row.get(11)?;
+        let completed_at: Option<String> = row.get(11)?;
+        let idempotency_key: String = row.get(12)?;
         Ok((|| {
             Ok(WakeEvent {
                 event_id,
@@ -248,6 +271,7 @@ impl Store {
                 attempt_count,
                 created_at,
                 acknowledged_at,
+                completed_at,
                 idempotency_key,
             })
         })())
@@ -307,6 +331,34 @@ mod tests {
         store.ack_wake_event(&ev.event_id).unwrap();
         let err = store.ack_wake_event(&ev.event_id).unwrap_err();
         assert!(matches!(err, StoreError::InvalidInput(_)), "acking an already-acknowledged event must fail, not silently succeed again");
+    }
+
+    #[test]
+    fn complete_requires_prior_ack() {
+        let store = Store::open(":memory:").unwrap();
+        let ev = store.create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        let err = store.complete_wake_event(&ev.event_id).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidInput(_)), "completing straight from pending must be rejected - completed should imply an ack happened");
+    }
+
+    #[test]
+    fn complete_transitions_acknowledged_to_completed() {
+        let store = Store::open(":memory:").unwrap();
+        let ev = store.create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        store.ack_wake_event(&ev.event_id).unwrap();
+        let completed = store.complete_wake_event(&ev.event_id).unwrap();
+        assert_eq!(completed.status, WakeEventStatus::Completed);
+        assert!(completed.completed_at.is_some());
+    }
+
+    #[test]
+    fn complete_is_not_repeatable() {
+        let store = Store::open(":memory:").unwrap();
+        let ev = store.create_wake_event("agent:primary", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        store.ack_wake_event(&ev.event_id).unwrap();
+        store.complete_wake_event(&ev.event_id).unwrap();
+        let err = store.complete_wake_event(&ev.event_id).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidInput(_)), "completing an already-completed event must fail, not silently succeed again");
     }
 
     #[test]
