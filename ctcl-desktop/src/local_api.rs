@@ -73,6 +73,14 @@ fn required_scope(method: &Method, path: &str) -> Option<&'static str> {
         (Method::Post, p) if p.starts_with("/v1/wake-events/") && p.ends_with("/decision") => Some("decision_receipts.write"),
         // covers both GET /v1/wake-events/{id} and GET /v1/wake-events/{id}/decision - both are reads.
         (Method::Get, p) if p.starts_with("/v1/wake-events/") => Some("wake_events.read"),
+        (Method::Get, "/v1/agents") => Some("agents.read"),
+        (Method::Post, "/v1/agents") => Some("agents.write"),
+        // enable/disable are registry management (agents.write), same as
+        // create - actually DISPATCHING to an enabled endpoint is gated
+        // separately by agent_wake.dispatch, checked by wake_delivery.rs
+        // itself before every delivery attempt, not here.
+        (Method::Post, p) if p.starts_with("/v1/agents/") && (p.ends_with("/enable") || p.ends_with("/disable")) => Some("agents.write"),
+        (Method::Get, p) if p.starts_with("/v1/agents/") => Some("agents.read"),
         _ => None,
     }
 }
@@ -255,6 +263,46 @@ fn handle_request(store: &Arc<Mutex<Store>>, mut request: Request) {
             let id = &p["/v1/wake-events/".len()..];
             match store.lock().unwrap().get_wake_event(id) {
                 Ok(ev) => respond_ok(request, json!(ev)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        // §10.3 Agent Endpoint API - the registry Phase 4.5D's Wake Delivery
+        // Worker reads from. Registering one here never dispatches anything
+        // by itself: it's created disabled (agents.write only toggles the
+        // registry row), and even enabled, wake_delivery.rs still checks the
+        // separate agent_wake.dispatch scope before ever calling out.
+        (Method::Get, "/v1/agents") => match store.lock().unwrap().list_agent_endpoints() {
+            Ok(agents) => respond_ok(request, json!({ "agents": agents })),
+            Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+        },
+        (Method::Post, "/v1/agents") => {
+            let agent_id = json_body.get("agent_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let transport = json_body.get("transport").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let endpoint = json_body.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let auth_ref = json_body.get("auth_ref").and_then(|v| v.as_str()).map(|s| s.to_string());
+            match store.lock().unwrap().create_agent_endpoint(&agent_id, &transport, &endpoint, auth_ref.as_deref(), &[]) {
+                Ok(ep) => respond_ok(request, json!(ep)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Post, p) if p.starts_with("/v1/agents/") && p.ends_with("/enable") => {
+            let id = &p["/v1/agents/".len()..p.len() - "/enable".len()];
+            match store.lock().unwrap().set_agent_endpoint_enabled(id, true) {
+                Ok(ep) => respond_ok(request, json!(ep)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Post, p) if p.starts_with("/v1/agents/") && p.ends_with("/disable") => {
+            let id = &p["/v1/agents/".len()..p.len() - "/disable".len()];
+            match store.lock().unwrap().set_agent_endpoint_enabled(id, false) {
+                Ok(ep) => respond_ok(request, json!(ep)),
+                Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
+            }
+        }
+        (Method::Get, p) if p.starts_with("/v1/agents/") => {
+            let id = &p["/v1/agents/".len()..];
+            match store.lock().unwrap().get_agent_endpoint(id) {
+                Ok(ep) => respond_ok(request, json!(ep)),
                 Err(e) => respond_error(request, 400, e.code(), &e.to_string()),
             }
         }
@@ -568,6 +616,67 @@ mod tests {
 
         let body = r#"{"agent_id":"agent:primary","run_id":"run:1","decision":"maybe"}"#;
         let r = raw_request(4517, "POST", &format!("/v1/wake-events/{}/decision", ev.event_id), Some("secret-token"), body);
+        assert_eq!(r.status, 400);
+    }
+
+    #[test]
+    fn agent_endpoint_create_list_get_over_http() {
+        let (store, _handle) = test_store_with_token(4523, "secret-token");
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("agents.write".to_string(), true);
+        settings.scopes.insert("agents.read".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let body = r#"{"agent_id":"agent:primary","transport":"loopback_http","endpoint":"http://127.0.0.1:4400/wake","auth_ref":"secret"}"#;
+        let created = raw_request(4523, "POST", "/v1/agents", Some("secret-token"), body);
+        assert_eq!(created.status, 200, "body: {}", created.body);
+        assert!(created.body.contains("\"enabled\":false") || created.body.contains("\"enabled\": false"), "must start disabled per §9.1");
+
+        let listed = raw_request(4523, "GET", "/v1/agents", Some("secret-token"), "");
+        assert_eq!(listed.status, 200);
+        assert!(listed.body.contains("agent:primary"));
+
+        let got = raw_request(4523, "GET", "/v1/agents/agent:primary", Some("secret-token"), "");
+        assert_eq!(got.status, 200);
+        assert!(got.body.contains("loopback_http"));
+    }
+
+    #[test]
+    fn agent_endpoint_write_and_read_are_separately_scope_gated() {
+        let (_store, _handle) = test_store_with_token(4524, "secret-token");
+        let create_refused = raw_request(4524, "POST", "/v1/agents", Some("secret-token"), "{}");
+        assert_eq!(create_refused.status, 403, "agents.write is off by default");
+
+        let list_refused = raw_request(4524, "GET", "/v1/agents", Some("secret-token"), "");
+        assert_eq!(list_refused.status, 403, "agents.read is off by default");
+    }
+
+    #[test]
+    fn agent_endpoint_enable_then_disable_over_http() {
+        let (store, _handle) = test_store_with_token(4525, "secret-token");
+        store.lock().unwrap().create_agent_endpoint("agent:primary", "loopback_http", "http://127.0.0.1:4400/wake", None, &[]).unwrap();
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("agents.write".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let enabled = raw_request(4525, "POST", "/v1/agents/agent:primary/enable", Some("secret-token"), "");
+        assert_eq!(enabled.status, 200);
+        assert!(store.lock().unwrap().get_agent_endpoint("agent:primary").unwrap().enabled);
+
+        let disabled = raw_request(4525, "POST", "/v1/agents/agent:primary/disable", Some("secret-token"), "");
+        assert_eq!(disabled.status, 200);
+        assert!(!store.lock().unwrap().get_agent_endpoint("agent:primary").unwrap().enabled);
+    }
+
+    #[test]
+    fn agent_endpoint_create_rejects_an_invalid_transport_over_http() {
+        let (store, _handle) = test_store_with_token(4526, "secret-token");
+        let mut settings = store.lock().unwrap().get_settings().unwrap();
+        settings.scopes.insert("agents.write".to_string(), true);
+        store.lock().unwrap().save_settings(&settings).unwrap();
+
+        let body = r#"{"agent_id":"agent:primary","transport":"remote_webhook","endpoint":"https://example.com"}"#;
+        let r = raw_request(4526, "POST", "/v1/agents", Some("secret-token"), body);
         assert_eq!(r.status, 400);
     }
 

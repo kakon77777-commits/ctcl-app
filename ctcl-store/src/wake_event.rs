@@ -80,7 +80,34 @@ pub struct WakeEvent {
     pub created_at: String,
     pub acknowledged_at: Option<String>,
     pub completed_at: Option<String>,
+    /// Phase 4.5D: set when `record_delivery_success` transitions delivering -> delivered.
+    pub delivered_at: Option<String>,
+    /// Phase 4.5D: set by `record_delivery_failure` when retrying - the
+    /// Wake Delivery Worker won't pick this event up again before this time.
+    pub next_attempt_at: Option<String>,
+    /// Phase 4.5D: the most recent delivery error, kept even after a
+    /// successful retry or a dead-letter, for post-mortem visibility.
+    pub last_error: Option<String>,
     pub idempotency_key: String,
+}
+
+/// §8.1 step 6: after this many failed delivery attempts, an event moves to
+/// `dead_letter` instead of retrying again. Not user-configurable in this
+/// phase - the whitepaper names the *mechanism* (exponential backoff, a cap)
+/// without specifying an exact number.
+const MAX_DELIVERY_ATTEMPTS: i64 = 5;
+/// §8.2's d_0.
+const BASE_DELAY_S: i64 = 5;
+/// §8.2's d_max.
+const MAX_DELAY_S: i64 = 300;
+
+/// §8.2's epsilon - random jitter so multiple events retrying around the
+/// same time don't all wake the delivery thread in lockstep. Not
+/// cryptographic - just needs to differ call to call, so a `rand` crate
+/// dependency isn't justified for it.
+fn jitter_ms() -> i64 {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+    (nanos % 1000) as i64
 }
 
 impl Store {
@@ -114,8 +141,8 @@ impl Store {
             return Ok(ev);
         }
         self.conn.execute(
-            "INSERT INTO wake_events (event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, idempotency_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, ?8, NULL, NULL, ?9)",
+            "INSERT INTO wake_events (event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, delivered_at, next_attempt_at, last_error, idempotency_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', 0, ?8, NULL, NULL, NULL, NULL, NULL, ?9)",
             rusqlite::params![event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, created_at, idempotency_key],
         )?;
         self.get_wake_event(&event_id)
@@ -124,7 +151,7 @@ impl Store {
     pub fn get_wake_event(&self, event_id: &str) -> Result<WakeEvent, StoreError> {
         self.conn
             .query_row(
-                "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, idempotency_key
+                "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, delivered_at, next_attempt_at, last_error, idempotency_key
                  FROM wake_events WHERE event_id = ?1",
                 [event_id],
                 Self::row_to_wake_event,
@@ -134,7 +161,7 @@ impl Store {
 
     fn get_wake_event_by_idempotency_key(&self, key: &str) -> Result<Option<WakeEvent>, StoreError> {
         let result = self.conn.query_row(
-            "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, idempotency_key
+            "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, delivered_at, next_attempt_at, last_error, idempotency_key
              FROM wake_events WHERE idempotency_key = ?1",
             [key],
             Self::row_to_wake_event,
@@ -150,7 +177,7 @@ impl Store {
     /// optional (§10.2's `GET /v1/wake-events?status=pending&agent_id=...`).
     pub fn list_wake_events(&self, agent_id: Option<&str>, status: Option<WakeEventStatus>) -> Result<Vec<WakeEvent>, StoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, idempotency_key
+            "SELECT event_id, trigger_id, agent_id, reason, fired_json, observed_json, payload_json, status, attempt_count, created_at, acknowledged_at, completed_at, delivered_at, next_attempt_at, last_error, idempotency_key
              FROM wake_events ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], Self::row_to_wake_event)?.collect::<Result<Vec<_>, rusqlite::Error>>()?;
@@ -164,19 +191,25 @@ impl Store {
         Ok(events)
     }
 
-    /// Manual ack (Phase 4.5A scope): pending -> acknowledged only. Anything
-    /// else (already acknowledged, dead-lettered, etc.) is rejected rather
-    /// than silently overwritten - an ack is a one-time signal that a real
-    /// Agent Runtime actually picked this event up.
+    /// Manual ack: `pending` -> `acknowledged` (Phase 4.5A's Poll-only path)
+    /// or, since Phase 4.5D, `delivered` -> `acknowledged` (the Active
+    /// Delivery path - a WakeEvent pushed to a registered Agent Endpoint
+    /// still needs an explicit ack once the agent has actually seen it, `202
+    /// Accepted` from a loopback_http endpoint or a successful local_process
+    /// spawn is NOT treated as acknowledgement, matching §9.2's explicit
+    /// warning not to treat 202 as task completion). Anything else (already
+    /// acknowledged, dead-lettered, etc.) is rejected rather than silently
+    /// overwritten - an ack is a one-time signal that a real Agent Runtime
+    /// actually picked this event up.
     pub fn ack_wake_event(&self, event_id: &str) -> Result<WakeEvent, StoreError> {
         let changed = self.conn.execute(
-            "UPDATE wake_events SET status='acknowledged', acknowledged_at=?1 WHERE event_id=?2 AND status='pending'",
+            "UPDATE wake_events SET status='acknowledged', acknowledged_at=?1 WHERE event_id=?2 AND status IN ('pending','delivered')",
             rusqlite::params![chrono::Utc::now().to_rfc3339(), event_id],
         )?;
         if changed == 0 {
             let existing = self.get_wake_event(event_id)?;
             return Err(StoreError::InvalidInput(format!(
-                "cannot acknowledge wake event {event_id}: status is '{}', not 'pending'",
+                "cannot acknowledge wake event {event_id}: status is '{}', not 'pending'/'delivered'",
                 existing.status.as_str()
             )));
         }
@@ -200,6 +233,97 @@ impl Store {
                 "cannot complete wake event {event_id}: status is '{}', not 'acknowledged'",
                 existing.status.as_str()
             )));
+        }
+        self.get_wake_event(event_id)
+    }
+
+    /// Phase 4.5D (§8.1): events an active-delivery Wake Delivery Worker
+    /// should attempt right now - `pending` (never tried) or `retry_wait`
+    /// whose backoff has elapsed - for an agent_id with an ENABLED
+    /// `agent_endpoints` row. An agent with no registered/enabled endpoint
+    /// simply never appears here and stays reachable only by polling
+    /// (Phase 4.5B) - active delivery is additive, not a replacement.
+    /// `limit` bounds how many events one evaluation tick processes, which
+    /// is this phase's concurrency limit (§9.1/§23's "併發限制"): a single
+    /// poll loop, not a thread pool, so "at most N in-flight per tick" is
+    /// the honest shape that control takes here.
+    pub fn due_for_delivery(&self, now_iso: &str, limit: i64) -> Result<Vec<WakeEvent>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT we.event_id, we.trigger_id, we.agent_id, we.reason, we.fired_json, we.observed_json, we.payload_json, we.status, we.attempt_count, we.created_at, we.acknowledged_at, we.completed_at, we.delivered_at, we.next_attempt_at, we.last_error, we.idempotency_key
+             FROM wake_events we
+             JOIN agent_endpoints ae ON ae.agent_id = we.agent_id
+             WHERE ae.enabled = 1
+               AND (we.status = 'pending' OR (we.status = 'retry_wait' AND (we.next_attempt_at IS NULL OR we.next_attempt_at <= ?1)))
+             ORDER BY we.created_at ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![now_iso, limit], Self::row_to_wake_event)?.collect::<Result<Vec<_>, rusqlite::Error>>()?;
+        rows.into_iter().collect()
+    }
+
+    /// pending/retry_wait -> delivering, right before a dispatcher is
+    /// actually invoked - claims the event so a second delivery-thread tick
+    /// (or a future concurrent worker) doesn't double-dispatch it.
+    pub fn mark_wake_event_delivering(&self, event_id: &str) -> Result<WakeEvent, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE wake_events SET status='delivering' WHERE event_id=?1 AND status IN ('pending','retry_wait')",
+            [event_id],
+        )?;
+        if changed == 0 {
+            let existing = self.get_wake_event(event_id)?;
+            return Err(StoreError::InvalidInput(format!(
+                "cannot start delivering wake event {event_id}: status is '{}', not 'pending'/'retry_wait'",
+                existing.status.as_str()
+            )));
+        }
+        self.get_wake_event(event_id)
+    }
+
+    /// delivering -> delivered. This is NOT the same as acknowledged (§9.2:
+    /// a `202 Accepted` / a successful process spawn means "handed off,"
+    /// not "the agent has acted" - `ack_wake_event` is the agent's own
+    /// separate, later signal).
+    pub fn record_delivery_success(&self, event_id: &str) -> Result<WakeEvent, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE wake_events SET status='delivered', delivered_at=?1 WHERE event_id=?2 AND status='delivering'",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), event_id],
+        )?;
+        if changed == 0 {
+            let existing = self.get_wake_event(event_id)?;
+            return Err(StoreError::InvalidInput(format!(
+                "cannot mark wake event {event_id} delivered: status is '{}', not 'delivering'",
+                existing.status.as_str()
+            )));
+        }
+        self.get_wake_event(event_id)
+    }
+
+    /// delivering -> retry_wait (with §8.2's exponential-backoff-plus-jitter
+    /// `next_attempt_at`) or, once `MAX_DELIVERY_ATTEMPTS` is reached,
+    /// delivering -> dead_letter (§8.1 step 6). Owns both the backoff math
+    /// and the give-up decision so `wake_delivery.rs` doesn't need to
+    /// reimplement the retry policy - it just reports "this attempt failed."
+    pub fn record_delivery_failure(&self, event_id: &str, error: &str) -> Result<WakeEvent, StoreError> {
+        let current = self.get_wake_event(event_id)?;
+        if current.status != WakeEventStatus::Delivering {
+            return Err(StoreError::InvalidInput(format!(
+                "cannot record a delivery failure for {event_id}: status is '{}', not 'delivering'",
+                current.status.as_str()
+            )));
+        }
+        let next_attempt_count = current.attempt_count + 1;
+        if next_attempt_count >= MAX_DELIVERY_ATTEMPTS {
+            self.conn.execute(
+                "UPDATE wake_events SET status='dead_letter', attempt_count=?1, last_error=?2 WHERE event_id=?3",
+                rusqlite::params![next_attempt_count, error, event_id],
+            )?;
+        } else {
+            let delay_s = (BASE_DELAY_S * 2i64.pow(current.attempt_count as u32)).min(MAX_DELAY_S);
+            let next_attempt_at = (chrono::Utc::now() + chrono::Duration::seconds(delay_s) + chrono::Duration::milliseconds(jitter_ms())).to_rfc3339();
+            self.conn.execute(
+                "UPDATE wake_events SET status='retry_wait', attempt_count=?1, next_attempt_at=?2, last_error=?3 WHERE event_id=?4",
+                rusqlite::params![next_attempt_count, next_attempt_at, error, event_id],
+            )?;
         }
         self.get_wake_event(event_id)
     }
@@ -257,7 +381,10 @@ impl Store {
         let created_at: String = row.get(9)?;
         let acknowledged_at: Option<String> = row.get(10)?;
         let completed_at: Option<String> = row.get(11)?;
-        let idempotency_key: String = row.get(12)?;
+        let delivered_at: Option<String> = row.get(12)?;
+        let next_attempt_at: Option<String> = row.get(13)?;
+        let last_error: Option<String> = row.get(14)?;
+        let idempotency_key: String = row.get(15)?;
         Ok((|| {
             Ok(WakeEvent {
                 event_id,
@@ -272,6 +399,9 @@ impl Store {
                 created_at,
                 acknowledged_at,
                 completed_at,
+                delivered_at,
+                next_attempt_at,
+                last_error,
                 idempotency_key,
             })
         })())
@@ -433,5 +563,111 @@ mod tests {
             .unwrap();
         let err = store.create_wake_event_from_trigger(&t, 200.0).unwrap_err();
         assert!(matches!(err, StoreError::InvalidInput(_)));
+    }
+
+    // ---- Phase 4.5D: Active Delivery ----
+
+    fn register_enabled_endpoint(store: &Store, agent_id: &str) {
+        store.create_agent_endpoint(agent_id, "loopback_http", "http://127.0.0.1:4400/wake", None, &[]).unwrap();
+        store.set_agent_endpoint_enabled(agent_id, true).unwrap();
+    }
+
+    #[test]
+    fn due_for_delivery_only_returns_events_for_enabled_endpoints() {
+        let store = Store::open(":memory:").unwrap();
+        store.create_wake_event("agent:no-endpoint", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        register_enabled_endpoint(&store, "agent:has-endpoint");
+        store.create_wake_event("agent:has-endpoint", None, "r", json!({}), json!({}), json!({}), "k2").unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let due = store.due_for_delivery(&now, 10).unwrap();
+        assert_eq!(due.len(), 1, "an agent with no registered/enabled endpoint must stay poll-only, not get picked up for active delivery");
+        assert_eq!(due[0].agent_id, "agent:has-endpoint");
+    }
+
+    #[test]
+    fn due_for_delivery_respects_the_batch_limit() {
+        let store = Store::open(":memory:").unwrap();
+        register_enabled_endpoint(&store, "agent:a");
+        store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k2").unwrap();
+        store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k3").unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        assert_eq!(store.due_for_delivery(&now, 2).unwrap().len(), 2, "the per-tick concurrency limit must cap how many come back");
+        assert_eq!(store.due_for_delivery(&now, 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn due_for_delivery_excludes_a_disabled_endpoint() {
+        let store = Store::open(":memory:").unwrap();
+        register_enabled_endpoint(&store, "agent:a");
+        store.set_agent_endpoint_enabled("agent:a", false).unwrap();
+        store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        assert!(store.due_for_delivery(&now, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mark_delivering_requires_pending_or_retry_wait() {
+        let store = Store::open(":memory:").unwrap();
+        let ev = store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        store.mark_wake_event_delivering(&ev.event_id).unwrap();
+        let err = store.mark_wake_event_delivering(&ev.event_id).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidInput(_)), "already-delivering must not be claimed a second time");
+    }
+
+    #[test]
+    fn delivering_then_success_reaches_delivered_and_can_still_be_acked() {
+        let store = Store::open(":memory:").unwrap();
+        let ev = store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+
+        let delivering = store.mark_wake_event_delivering(&ev.event_id).unwrap();
+        assert_eq!(delivering.status, WakeEventStatus::Delivering);
+
+        let delivered = store.record_delivery_success(&ev.event_id).unwrap();
+        assert_eq!(delivered.status, WakeEventStatus::Delivered);
+        assert!(delivered.delivered_at.is_some());
+
+        // delivered != acknowledged (§9.2: a 202/successful spawn is not task completion)
+        let acked = store.ack_wake_event(&ev.event_id).unwrap();
+        assert_eq!(acked.status, WakeEventStatus::Acknowledged);
+    }
+
+    #[test]
+    fn record_delivery_failure_requires_delivering_status() {
+        let store = Store::open(":memory:").unwrap();
+        let ev = store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        let err = store.record_delivery_failure(&ev.event_id, "boom").unwrap_err();
+        assert!(matches!(err, StoreError::InvalidInput(_)), "can't fail a delivery that was never claimed");
+    }
+
+    #[test]
+    fn record_delivery_failure_retries_with_backoff_before_dead_lettering() {
+        let store = Store::open(":memory:").unwrap();
+        let ev = store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+        store.mark_wake_event_delivering(&ev.event_id).unwrap();
+
+        let retried = store.record_delivery_failure(&ev.event_id, "connection refused").unwrap();
+        assert_eq!(retried.status, WakeEventStatus::RetryWait);
+        assert_eq!(retried.attempt_count, 1);
+        assert!(retried.next_attempt_at.is_some(), "a retry must schedule a next_attempt_at (§8.2 backoff)");
+        assert_eq!(retried.last_error.as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn record_delivery_failure_dead_letters_after_max_attempts() {
+        let store = Store::open(":memory:").unwrap();
+        let ev = store.create_wake_event("agent:a", None, "r", json!({}), json!({}), json!({}), "k1").unwrap();
+
+        for _ in 0..MAX_DELIVERY_ATTEMPTS {
+            store.mark_wake_event_delivering(&ev.event_id).unwrap();
+            store.record_delivery_failure(&ev.event_id, "still down").unwrap();
+        }
+        let final_state = store.get_wake_event(&ev.event_id).unwrap();
+        assert_eq!(final_state.status, WakeEventStatus::DeadLetter, "must give up after §8.1 step 6's attempt cap, not retry forever");
+        assert_eq!(final_state.attempt_count, MAX_DELIVERY_ATTEMPTS);
+        assert_eq!(final_state.last_error.as_deref(), Some("still down"));
     }
 }

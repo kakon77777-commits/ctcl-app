@@ -6,6 +6,7 @@
 //! remember what it was told.
 
 mod error;
+pub mod agent_endpoint;
 pub mod audit;
 pub mod decision_receipt;
 pub mod device_observer;
@@ -16,6 +17,7 @@ pub mod system;
 pub mod trigger;
 pub mod wake_event;
 
+pub use agent_endpoint::AgentEndpoint;
 pub use audit::AuditEntry;
 pub use decision_receipt::DecisionReceipt;
 pub use device_observer::{DeviceEvent, EventKind};
@@ -122,6 +124,9 @@ impl Store {
                 created_at        TEXT NOT NULL,
                 acknowledged_at   TEXT,
                 completed_at      TEXT,
+                delivered_at      TEXT,
+                next_attempt_at   TEXT,
+                last_error        TEXT,
                 idempotency_key   TEXT NOT NULL UNIQUE
             );
             CREATE TABLE IF NOT EXISTS decision_receipts (
@@ -136,8 +141,35 @@ impl Store {
                 cost_json       TEXT,
                 created_at      TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS agent_endpoints (
+                agent_id                 TEXT PRIMARY KEY,
+                transport                TEXT NOT NULL,
+                endpoint                 TEXT NOT NULL,
+                auth_ref                 TEXT,
+                enabled                  INTEGER NOT NULL DEFAULT 0,
+                allowed_event_kinds_json TEXT NOT NULL,
+                created_at               TEXT NOT NULL,
+                updated_at               TEXT NOT NULL
+            );
             ",
         )?;
+        // wake_events gained delivered_at/next_attempt_at/last_error in Phase
+        // 4.5D. CREATE TABLE IF NOT EXISTS only helps fresh databases - a
+        // db file from 4.5A-C already has the table without these columns,
+        // so add them defensively if missing (idempotent: safe to run on a
+        // database that already has them, and on one that's brand new).
+        self.ensure_column("wake_events", "delivered_at", "delivered_at TEXT")?;
+        self.ensure_column("wake_events", "next_attempt_at", "next_attempt_at TEXT")?;
+        self.ensure_column("wake_events", "last_error", "last_error TEXT")?;
+        Ok(())
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, add_column_ddl: &str) -> Result<(), StoreError> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let existing = stmt.query_map([], |row| row.get::<_, String>(1))?.collect::<Result<Vec<String>, _>>()?;
+        if !existing.iter().any(|c| c == column) {
+            self.conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {add_column_ddl}"), [])?;
+        }
         Ok(())
     }
 }

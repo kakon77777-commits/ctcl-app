@@ -41,14 +41,17 @@ desktop-first, not a rewrite of the hosted API.
 - `ctcl-desktop/` — the **real desktop shell** (Tauri 2). Same
   `ctcl-core`/`ctcl-store` as the CLI, called through Tauri's IPC instead of
   HTTP. A genuine double-click-able window, not a browser preview. Also owns
-  three background threads that only run when explicitly enabled (all off by
+  four background threads that only run when explicitly enabled (all off by
   default, whitepaper §7.2 "default off"): `local_api.rs` (Phase 2 — a
   loopback-only HTTP gateway, bearer-token auth, capability-scope enforced,
   every call audit-logged), `device_observer.rs` (Phase 3 — periodically
   samples the wall clock against a monotonic anchor and classifies drift /
-  sleep-wake / manual clock rollback; only anomalies are persisted), and
+  sleep-wake / manual clock rollback; only anomalies are persisted),
   `trigger_engine.rs` (Phase 4 — polls due triggers and dispatches their
-  action through a pluggable `ActionDispatcher`).
+  action through a pluggable `ActionDispatcher`), and `wake_delivery.rs`
+  (Phase 4.5D — actively pushes WakeEvents to registered Agent Endpoints via
+  a pluggable `WakeDispatcher`, with exponential-backoff retry and
+  dead-letter).
 - `ctcl-mcp/` — Phase 4.5C's **Local MCP server** (binary `ctcl-mcp`): a
   stdio-transport [Model Context Protocol](https://modelcontextprotocol.io)
   server (built on the official [`rmcp`](https://crates.io/crates/rmcp) SDK)
@@ -61,7 +64,7 @@ desktop-first, not a rewrite of the hosted API.
 
 ```bash
 cargo build
-cargo test               # 105 tests across ctcl-core + ctcl-store + ctcl-desktop + ctcl-mcp
+cargo test               # 138 tests across ctcl-core + ctcl-store + ctcl-desktop + ctcl-mcp
 cargo run --bin ctcl -- now
 cargo run --bin ctcl -- convert --value 1783420000.5 --from unix_s --to rfc3339 --tz Asia/Taipei
 cargo run --bin ctcl -- serve                       # opens a browser, no terminal needed after this
@@ -317,14 +320,96 @@ genuinely refused - the same "real socket, not mocks" discipline
 protocol boundary. **105 tests total** across the workspace, `cargo build
 --workspace` (full link) clean.
 
-Still to come: Phase 4.5D (Active Delivery — loopback HTTP/local-process
-push, retry, dead-letter, an Agent Endpoint registry) from the Agent Wake
-whitepaper, and — unrelated, still paused per Neo's direction while this took
-priority — Phase 5 (team sync — note this needs an actual sync-backend
-*product* decision, e.g. self-hosted vs. hub on commoninstant.org vs. a new
-paid tier, not just more local Rust code, so it's being left for Neo to weigh
-in on rather than architected unilaterally) and Phase 6 (mobile companion,
-explicitly last per the whitepaper's own ordering).
+**Phase 4.5D (Active Delivery) shipped 2026-07-20** — whitepaper §8/§9,
+**closing out the entire Phase 4 family (4 → 4.5A → 4.5B → 4.5C → 4.5D) from
+both whitepapers in one continuous run.** An Agent Runtime no longer has to
+poll: CTCL can now actively push a WakeEvent to a registered Agent Endpoint.
+Purely additive - any `agent_id` with nothing registered keeps working
+exactly as Phase 4.5B's poll-only path, unchanged.
+- **New `agent_endpoints` registry** (§6.2/§10.3): `transport` is
+  `local_process` or `loopback_http` only - `remote_webhook` stays
+  explicitly deferred (§9.4: public exposure, OAuth/signing, replay, SSRF,
+  DNS, TLS, secrets - all real problems this phase doesn't take on) and
+  `queue_adapter` is unspecified. `local_process` registration
+  **canonicalizes and verifies the executable actually exists** at
+  registration time (§9.1: "路徑需正規化" + "可執行檔必須由使用者明確登記");
+  `loopback_http` registration **rejects any host that isn't
+  127.0.0.1/localhost** (§9.2: "綁定 localhost"). An endpoint is always
+  created **disabled** regardless of what's posted, and re-registering an
+  existing one (e.g. changing its target) resets it back to disabled too -
+  the moment a target changes is exactly when a stale "still enabled" flag
+  would be most dangerous.
+- **`wake_delivery.rs`**, a fourth background thread, same pluggable-trait
+  shape as `trigger_engine.rs`'s `ActionDispatcher`: a `WakeDispatcher` trait
+  with a `RealWakeDispatcher` (`local_process` spawns the registered
+  executable with a **fixed, structured argument template** -
+  `--wake-event <event_id>`, never a shell, never string-interpolated
+  command text, per §9.1's explicit security requirement; `loopback_http`
+  POSTs the WakeEvent JSON with an `Authorization: Bearer` header if one was
+  registered, and - per §9.2's explicit instruction not to treat a 202 as
+  task completion - **only HTTP 202 counts as delivered**, any other status
+  or a connection failure is a delivery failure).
+- **Three independent gates before anything is ever dispatched**: (1)
+  `wake_delivery_enabled` (the thread doesn't even start otherwise, same
+  "off by default" discipline as every other background thread), (2) the
+  `agent_wake.dispatch` capability scope, re-checked every tick (not just
+  once at startup, so revoking it mid-run takes effect on the next pass),
+  (3) the per-endpoint `enabled` flag. Registering an endpoint alone does
+  nothing.
+- **§8.2's exponential backoff with jitter**, owned entirely by
+  `ctcl-store` (not the caller): `Store::record_delivery_failure` computes
+  `min(d_max, d_0 · 2ⁿ) + ε` and moves a WakeEvent to `retry_wait` with a
+  concrete `next_attempt_at`, or - after a capped number of attempts (§8.1
+  step 6) - to `dead_letter` instead. `due_for_delivery` only returns
+  `retry_wait` events whose backoff has actually elapsed.
+- **§9.1/§23's "併發限制" (concurrency limit)**, honestly scoped: this is
+  one poll loop, not a thread pool, so the limit is "at most N WakeEvents
+  processed per evaluation tick" rather than literal multi-threaded
+  dispatch - a real, working cap on how many process spawns / outbound HTTP
+  calls happen in a short window, without overclaiming a concurrency model
+  this phase doesn't actually build.
+- **`ack_wake_event` now also accepts `delivered`**, not just `pending` -
+  `delivered` (a successful push) and `acknowledged` (the agent's own,
+  separate, later signal that it actually saw the event) are deliberately
+  different states, matching §9.2's warning against conflating "handed off"
+  with "task complete."
+- **A real, general correctness fix surfaced by this phase, not scoped down
+  to it**: `Settings` had no `#[serde(default)]` handling at all - every
+  field added since Phase 3 carried a latent risk that reopening an OLDER
+  saved settings blob would hard-fail deserialization and break nearly
+  every operation in the app. Fixed at the struct level (reusing the
+  existing `impl Default for Settings`) rather than patched narrowly for
+  just this phase's two new fields, with a regression test that writes a
+  genuinely old-shape JSON blob directly into the database and confirms it
+  still loads.
+- Exposed the standard three ways: Local API (`GET /v1/agents`,
+  `POST /v1/agents`, `GET /v1/agents/{agent_id}`,
+  `POST /v1/agents/{agent_id}/enable`/`disable`, three new off-by-default
+  scopes `agents.read`/`agents.write`/`agent_wake.dispatch`), Tauri commands,
+  and a Settings card (toggle + interval + a registration form + a live list
+  with per-endpoint enable/disable buttons).
+- 33 new tests across three crates, all with real infrastructure where it
+  mattered rather than mocks: `agent_endpoint.rs`'s registration validation,
+  `wake_event.rs`'s full delivering→delivered / delivering→retry_wait→
+  dead_letter state machine, `wake_delivery.rs`'s dispatchers tested against
+  **a real spawned process** (this project's own test binary, reused the
+  same way `agent_endpoint.rs`'s tests already did for path validation) and
+  **a real `tiny_http` server** asserting the actual `Authorization` header
+  and rejecting a genuine non-202 response, plus `local_api.rs`'s usual
+  real-socket route coverage. **138 tests total** across the workspace,
+  `cargo build --workspace` (full link) clean.
+
+This closes the Agent Wake & MCP Temporal Runtime whitepaper's own Phase
+4/4.5A-D roadmap end to end: Trigger → WakeEvent → poll-only bridge →
+decision receipts → a local MCP tool surface → active push delivery with
+retry and dead-letter. Still to come, unrelated and still paused per Neo's
+direction while this took priority: Phase 5A (Remote MCP Gateway) / 5B
+(Task-aware Temporal Runtime) from the same whitepaper, Phase 5 (team sync -
+note this needs an actual sync-backend *product* decision, e.g. self-hosted
+vs. hub on commoninstant.org vs. a new paid tier, not just more local Rust
+code, so it's being left for Neo to weigh in on rather than architected
+unilaterally), and Phase 6 (mobile companion, explicitly last per the
+whitepaper's own ordering).
 
 This is intentionally **not** trying to replicate CTCL Web's whole surface at
 once — it starts from the same core math and grows outward, same as the Worker

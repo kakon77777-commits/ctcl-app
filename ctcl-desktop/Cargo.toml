@@ -17,3 +17,5 @@ tiny_http = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 ctcl-core = { path = "../ctcl-core" }
 ctcl-store = { path = "../ctcl-store" }
+# no TLS/gzip - loopback_http delivery only ever talks plain http://127.0.0.1
+ureq = { version = "2", default-features = false }

@@ -264,6 +264,34 @@ input:disabled + .slider{opacity:.4;cursor:not-allowed}
     </div>
 
     <div class="card">
+      <h2>Agent Endpoints（主動喚醒） <span class="badge" id="wakeDeliveryStatusBadge">…</span></h2>
+      <p style="color:var(--faint);font-size:.82rem;margin-bottom:.8rem">預設情況下 Agent 要自己來問 CTCL 有沒有新的 WakeEvent（上面那張卡片）。這裡可以登記一個 Agent 的位置，讓 CTCL 反過來主動通知它 - 但登記完還是預設關閉，要自己按「啟用」。</p>
+      <div class="row-line">
+        <span class="lbl">開啟主動喚醒（Wake Delivery）</span>
+        <label class="switch"><input type="checkbox" id="wakeDeliveryEnabled"><span class="slider"></span></label>
+      </div>
+      <label for="wakeDeliveryCheckInterval">檢查間隔（秒）</label>
+      <input type="number" id="wakeDeliveryCheckInterval" min="1" max="3600">
+
+      <label for="agentEndpointId">Agent ID</label>
+      <input type="text" class="mono" id="agentEndpointId" placeholder="agent:primary">
+      <label for="agentEndpointTransport">交付方式</label>
+      <select id="agentEndpointTransport">
+        <option value="loopback_http">Loopback HTTP（CTCL 呼叫 Agent 的本機 API）</option>
+        <option value="local_process">本機程式（CTCL 啟動已登記的執行檔）</option>
+      </select>
+      <label for="agentEndpointEndpoint">位置（URL 或執行檔路徑）</label>
+      <input type="text" class="mono" id="agentEndpointEndpoint" placeholder="http://127.0.0.1:5000/wake 或 C:\agent\runtime.exe">
+      <label for="agentEndpointAuthRef">Bearer Token（只有 Loopback HTTP 需要）</label>
+      <input type="text" class="mono" id="agentEndpointAuthRef" placeholder="選填">
+      <button id="createAgentEndpoint">登記 Agent Endpoint</button>
+      <div class="err" id="agentEndpointErr"></div>
+
+      <button class="sec" id="refreshAgentEndpoints" style="margin-top:1.1rem">重新整理 Agent Endpoints</button>
+      <div id="agentEndpointsList" style="margin-top:.8rem"></div>
+    </div>
+
+    <div class="card">
       <h2>之後會有的功能</h2>
       <p style="color:var(--faint);font-size:.82rem;margin-bottom:.4rem">這些先放在這裡當作清單，目前按了還不會有作用。</p>
       <div id="futureFeatures"></div>
@@ -293,7 +321,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
     tab.classList.add('active');
     document.getElementById(VIEW_IDS[tab.dataset.view] || 'viewHome').classList.add('active');
     if (tab.dataset.view === 'dashboard') { loadSystems(); loadGroups(); }
-    if (tab.dataset.view === 'settings') { loadSettings(); loadAuditLog(); loadDeviceStatus(); loadDeviceEvents(); loadTriggers(); loadWakeEvents(); }
+    if (tab.dataset.view === 'settings') { loadSettings(); loadAuditLog(); loadDeviceStatus(); loadDeviceEvents(); loadTriggers(); loadWakeEvents(); loadAgentEndpoints(); }
   });
 });
 
@@ -371,6 +399,9 @@ const SCOPE_LABELS = {
   "triggers.cancel": "取消觸發器（透過本機 API，與建立分開授權）",
   "wake_events.complete": "標記 WakeEvent 已完成",
   "decision_receipts.write": "寫入決策回執（Agent 回報它做了什麼決定）",
+  "agents.read": "讀取 Agent Endpoints 登記清單",
+  "agents.write": "登記／啟用／停用 Agent Endpoint",
+  "agent_wake.dispatch": "允許 CTCL 主動呼叫／啟動已登記的 Agent（總開關）",
 };
 const FEATURE_LABELS = {
   local_api: "本機 API", scopes: "權限範圍", audit_log: "稽核紀錄",
@@ -378,6 +409,7 @@ const FEATURE_LABELS = {
   triggers: "背景觸發器（時間到了自動做某件事）",
   wake_events: "WakeEvents（觸發器喚醒 Agent 的紀錄，不含實際行動）",
   decision_receipts: "決策回執（Agent 事後回報它決定了什麼，CTCL 不會據此自動採取行動）",
+  wake_delivery: "主動喚醒（CTCL 主動通知已登記的 Agent，而非等它來問）",
   encrypted_storage: "本機資料加密儲存",
   retention_policy: "資料保留天數（自動清除舊紀錄）",
 };
@@ -425,6 +457,12 @@ function renderSettings(view) {
   const triggerBadge = document.getElementById('triggerStatusBadge');
   if (view.trigger_engine_running) { triggerBadge.textContent = '運行中'; triggerBadge.className = 'badge on'; }
   else { triggerBadge.textContent = '已停止'; triggerBadge.className = 'badge off'; }
+
+  document.getElementById('wakeDeliveryEnabled').checked = currentSettings.wake_delivery_enabled;
+  document.getElementById('wakeDeliveryCheckInterval').value = currentSettings.wake_delivery_check_interval_s;
+  const wakeDeliveryBadge = document.getElementById('wakeDeliveryStatusBadge');
+  if (view.wake_delivery_running) { wakeDeliveryBadge.textContent = '運行中'; wakeDeliveryBadge.className = 'badge on'; }
+  else { wakeDeliveryBadge.textContent = '已停止'; wakeDeliveryBadge.className = 'badge off'; }
 
   const scopesEl = document.getElementById('scopesList');
   scopesEl.innerHTML = view.all_scopes.map((s) => `
@@ -653,6 +691,67 @@ async function loadWakeEvents() {
           console.error(e);
         }
         loadWakeEvents();
+      });
+    });
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+// ---- Wake Delivery Worker + Agent Endpoints (Phase 4.5D) ----
+document.getElementById('wakeDeliveryEnabled').addEventListener('change', async (e) => {
+  currentSettings.wake_delivery_enabled = e.target.checked;
+  await saveSettings();
+});
+document.getElementById('wakeDeliveryCheckInterval').addEventListener('change', async (e) => {
+  const v = parseInt(e.target.value, 10);
+  if (Number.isFinite(v) && v >= 1 && v <= 3600) { currentSettings.wake_delivery_check_interval_s = v; await saveSettings(); }
+});
+document.getElementById('refreshAgentEndpoints').addEventListener('click', loadAgentEndpoints);
+
+const TRANSPORT_LABELS = { loopback_http: 'Loopback HTTP', local_process: '本機程式' };
+
+document.getElementById('createAgentEndpoint').addEventListener('click', async () => {
+  const errEl = document.getElementById('agentEndpointErr');
+  errEl.textContent = '';
+  const agent_id = document.getElementById('agentEndpointId').value.trim();
+  const transport = document.getElementById('agentEndpointTransport').value;
+  const endpoint = document.getElementById('agentEndpointEndpoint').value.trim();
+  const auth_ref = document.getElementById('agentEndpointAuthRef').value.trim() || null;
+
+  if (!agent_id || !endpoint) { errEl.textContent = '請填寫 Agent ID 與位置'; return; }
+
+  try {
+    await invoke('create_agent_endpoint', { input: { agent_id, transport, endpoint, auth_ref } });
+    document.getElementById('agentEndpointId').value = '';
+    document.getElementById('agentEndpointEndpoint').value = '';
+    document.getElementById('agentEndpointAuthRef').value = '';
+    loadAgentEndpoints();
+  } catch (e) {
+    errEl.textContent = String((e && e.message) || e);
+  }
+});
+
+async function loadAgentEndpoints() {
+  try {
+    const endpoints = await invoke('list_agent_endpoints');
+    const el = document.getElementById('agentEndpointsList');
+    if (!endpoints.length) { el.innerHTML = '<div class="audit-empty">還沒有登記 Agent Endpoint</div>'; return; }
+    el.innerHTML = endpoints.map((ep) => `
+      <div class="row-line">
+        <span class="lbl">${ep.agent_id}<span class="id">${TRANSPORT_LABELS[ep.transport] || ep.transport} · ${ep.endpoint} · ${ep.enabled ? '已啟用' : '已停用'}</span></span>
+        <button class="sec small" data-toggle="${ep.agent_id}" data-enabled="${ep.enabled}">${ep.enabled ? '停用' : '啟用'}</button>
+      </div>
+    `).join('');
+    el.querySelectorAll('button[data-toggle]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        try {
+          const nowEnabled = btn.dataset.enabled === 'true';
+          await invoke('set_agent_endpoint_enabled', { agent_id: btn.dataset.toggle, enabled: !nowEnabled });
+        } catch (e) {
+          console.error(e);
+        }
+        loadAgentEndpoints();
       });
     });
   } catch (e) {

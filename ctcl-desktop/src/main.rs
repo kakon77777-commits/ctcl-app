@@ -7,9 +7,13 @@
 mod device_observer;
 mod local_api;
 mod trigger_engine;
+mod wake_delivery;
 
 use ctcl_core::{from_ns, now_view, to_ns};
-use ctcl_store::{ActionKind, AuditEntry, DeviceEvent, Operator, Settings, Store, Trigger, TriggerAction, TriggerKind, WakeEvent, WakeEventStatus, ALL_SCOPES};
+use ctcl_store::{
+    ActionKind, AgentEndpoint, AuditEntry, DeviceEvent, Operator, Settings, Store, Trigger, TriggerAction, TriggerKind, WakeEvent,
+    WakeEventStatus, ALL_SCOPES,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +22,7 @@ struct AppState {
     local_api: Mutex<Option<local_api::LocalApiHandle>>,
     device_observer: Mutex<Option<device_observer::ObserverHandle>>,
     trigger_engine: Mutex<Option<trigger_engine::TriggerEngineHandle>>,
+    wake_delivery: Mutex<Option<wake_delivery::WakeDeliveryHandle>>,
 }
 
 #[derive(Serialize)]
@@ -99,12 +104,14 @@ struct SettingsView {
     local_api_running: bool,
     device_observer_running: bool,
     trigger_engine_running: bool,
+    wake_delivery_running: bool,
 }
 
 fn settings_view(state: &tauri::State<AppState>, settings: Settings) -> SettingsView {
     let running = state.local_api.lock().unwrap().is_some();
     let observer_running = state.device_observer.lock().unwrap().is_some();
     let trigger_running = state.trigger_engine.lock().unwrap().is_some();
+    let wake_delivery_running = state.wake_delivery.lock().unwrap().is_some();
     SettingsView {
         settings,
         all_scopes: ALL_SCOPES,
@@ -112,6 +119,7 @@ fn settings_view(state: &tauri::State<AppState>, settings: Settings) -> Settings
         local_api_running: running,
         device_observer_running: observer_running,
         trigger_engine_running: trigger_running,
+        wake_delivery_running,
     }
 }
 
@@ -130,6 +138,7 @@ fn update_settings(state: tauri::State<AppState>, settings: Settings) -> Result<
     sync_local_api(&state, &settings);
     sync_device_observer(&state, &settings);
     sync_trigger_engine(&state, &settings);
+    sync_wake_delivery(&state, &settings);
     Ok(settings_view(&state, settings))
 }
 
@@ -242,6 +251,36 @@ fn get_decision_receipt(state: tauri::State<AppState>, event_id: String) -> Resu
     state.store.lock().unwrap().get_latest_decision_receipt(&event_id).map_err(|e| e.to_string())
 }
 
+// ---- Phase 4.5D: Agent Endpoint registry ------------------------------------
+
+#[derive(Deserialize)]
+struct CreateAgentEndpointInput {
+    agent_id: String,
+    transport: String, // "local_process" | "loopback_http"
+    endpoint: String,
+    auth_ref: Option<String>,
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn create_agent_endpoint(state: tauri::State<AppState>, input: CreateAgentEndpointInput) -> Result<AgentEndpoint, String> {
+    state
+        .store
+        .lock()
+        .unwrap()
+        .create_agent_endpoint(&input.agent_id, &input.transport, &input.endpoint, input.auth_ref.as_deref(), &[])
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_agent_endpoints(state: tauri::State<AppState>) -> Result<Vec<AgentEndpoint>, String> {
+    state.store.lock().unwrap().list_agent_endpoints().map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn set_agent_endpoint_enabled(state: tauri::State<AppState>, agent_id: String, enabled: bool) -> Result<AgentEndpoint, String> {
+    state.store.lock().unwrap().set_agent_endpoint_enabled(&agent_id, enabled).map_err(|e| e.to_string())
+}
+
 /// Ensure the running local API (if any) matches current settings - start it
 /// if now enabled, stop it if now disabled, restart it if the port changed.
 fn sync_local_api(state: &tauri::State<AppState>, settings: &Settings) {
@@ -282,6 +321,21 @@ fn sync_trigger_engine(state: &tauri::State<AppState>, settings: &Settings) {
     }
 }
 
+/// Same start/stop discipline as the other three background threads. The
+/// `agent_wake.dispatch` scope is checked by the thread itself every tick,
+/// not here - this toggle only controls whether the thread runs at all.
+fn sync_wake_delivery(state: &tauri::State<AppState>, settings: &Settings) {
+    let mut slot = state.wake_delivery.lock().unwrap();
+    *slot = None; // dropping the old handle (if any) stops the delivery thread
+    if settings.wake_delivery_enabled {
+        *slot = Some(wake_delivery::start(
+            state.store.clone(),
+            Arc::new(wake_delivery::RealWakeDispatcher),
+            settings.wake_delivery_check_interval_s,
+        ));
+    }
+}
+
 fn main() {
     let db_path = "ctcl-desktop-data.sqlite3";
     let store = Store::open(db_path).unwrap_or_else(|e| {
@@ -306,6 +360,10 @@ fn main() {
         .as_ref()
         .filter(|s| s.triggers_enabled)
         .map(|s| trigger_engine::start(store.clone(), Arc::new(trigger_engine::RealDispatcher), s.trigger_check_interval_s));
+    let wake_delivery = initial_settings
+        .as_ref()
+        .filter(|s| s.wake_delivery_enabled)
+        .map(|s| wake_delivery::start(store.clone(), Arc::new(wake_delivery::RealWakeDispatcher), s.wake_delivery_check_interval_s));
 
     tauri::Builder::default()
         .manage(AppState {
@@ -313,6 +371,7 @@ fn main() {
             local_api: Mutex::new(local_api),
             device_observer: Mutex::new(observer),
             trigger_engine: Mutex::new(triggers),
+            wake_delivery: Mutex::new(wake_delivery),
         })
         .invoke_handler(tauri::generate_handler![
             now,
@@ -337,6 +396,9 @@ fn main() {
             ack_wake_event,
             complete_wake_event,
             get_decision_receipt,
+            create_agent_endpoint,
+            list_agent_endpoints,
+            set_agent_endpoint_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the CTCL Temporal Port app");

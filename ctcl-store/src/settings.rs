@@ -31,6 +31,9 @@ pub const ALL_SCOPES: &[&str] = &[
     "triggers.cancel",
     "wake_events.complete",
     "decision_receipts.write",
+    "agents.read",
+    "agents.write",
+    "agent_wake.dispatch",
 ];
 
 /// §12.2 "Granted Capability -> min": only low-risk read/execute scopes are
@@ -46,6 +49,15 @@ fn generate_token() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Every field falls back to Settings::default()'s value if absent from a
+// saved JSON blob. Without this, a Settings document persisted by an OLDER
+// build (missing a field this phase adds - `wake_delivery_enabled` today,
+// but the same latent risk already existed for every field Phase 3/4 added)
+// would fail to deserialize AT ALL on the next `get_settings()` call,
+// breaking nearly every operation in the app. Struct-level default reuses
+// the existing `impl Default for Settings` below rather than per-field
+// literals, so it stays in sync automatically.
+#[serde(default)]
 pub struct Settings {
     // ---- Phase 2: Local Gateway / Localhost API (whitepaper §7.2) ----
     /// §7.2 "默認關閉" - disabled by default. No socket is bound at all while false.
@@ -77,6 +89,17 @@ pub struct Settings {
     pub triggers_enabled: bool,
     pub trigger_check_interval_s: u64,
 
+    // ---- Phase 4.5D: Wake Delivery Worker (whitepaper §8) ----
+    // Off by default, same discipline as every other background thread.
+    // When on, polls ctcl_store::wake_event::Store::due_for_delivery every
+    // wake_delivery_check_interval_s and actively pushes to any ENABLED
+    // agent_endpoints row - but only if the agent_wake.dispatch scope is
+    // ALSO granted (checked by the thread itself, not just at the API
+    // layer) - three independent gates before anything gets dispatched:
+    // this toggle, the scope, and the per-endpoint enabled flag.
+    pub wake_delivery_enabled: bool,
+    pub wake_delivery_check_interval_s: u64,
+
     // ---- §12.3: Local Data Protection - NOT YET IMPLEMENTED ----
     pub encrypted_storage_enabled: bool,
     pub retention_days: Option<u32>,
@@ -95,6 +118,8 @@ impl Default for Settings {
             device_clock_sample_interval_s: 20,
             triggers_enabled: false,
             trigger_check_interval_s: 5,
+            wake_delivery_enabled: false,
+            wake_delivery_check_interval_s: 5,
             encrypted_storage_enabled: false,
             retention_days: None,
         }
@@ -120,6 +145,7 @@ impl Settings {
             FeatureStatus { key: "triggers", phase: "Phase 4", implemented: true },
             FeatureStatus { key: "wake_events", phase: "Phase 4.5A", implemented: true },
             FeatureStatus { key: "decision_receipts", phase: "Phase 4.5B", implemented: true },
+            FeatureStatus { key: "wake_delivery", phase: "Phase 4.5D", implemented: true },
             FeatureStatus { key: "encrypted_storage", phase: "\u{00a7}12.3", implemented: false },
             FeatureStatus { key: "retention_policy", phase: "\u{00a7}12.3", implemented: false },
         ]
@@ -213,5 +239,34 @@ mod tests {
         for scope in ALL_SCOPES {
             assert!(settings.scopes.contains_key(*scope), "missing default for {scope}");
         }
+    }
+
+    /// A settings JSON blob saved by an OLDER build - before Phase 4.5D
+    /// added wake_delivery_enabled/wake_delivery_check_interval_s - must
+    /// still deserialize, falling back to Settings::default()'s values for
+    /// the fields it doesn't have, rather than erroring out on every
+    /// get_settings() call (which would break nearly everything in the app
+    /// the next time Neo opens a database from before this phase shipped).
+    #[test]
+    fn get_settings_tolerates_a_json_blob_missing_newer_fields() {
+        let store = Store::open(":memory:").unwrap();
+        // Written directly into the settings table, bypassing save_settings
+        // (which would just re-serialize a full modern Settings) - this is
+        // what a REAL pre-4.5D blob on disk actually looks like: no
+        // device_clock_*/triggers_*/wake_delivery_*/encrypted_storage_*/
+        // retention_days fields at all.
+        let old_shape = r#"{"local_api_enabled":true,"local_api_port":4180,"local_api_token":"abc123","scopes":{"instant.read":true},"audit_log_enabled":true}"#;
+        store
+            .conn
+            .execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![SETTINGS_KEY, old_shape],
+            )
+            .unwrap();
+
+        let loaded = store.get_settings().unwrap();
+        assert!(loaded.local_api_enabled, "fields present in the old blob must still be honored");
+        assert!(!loaded.wake_delivery_enabled, "a field the old blob never had must fall back to Settings::default(), not error");
+        assert_eq!(loaded.wake_delivery_check_interval_s, 5);
     }
 }
