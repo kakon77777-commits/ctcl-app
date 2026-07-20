@@ -36,8 +36,16 @@ pub struct Store {
 impl Store {
     /// Open (creating if needed) a SQLite database at `path` and ensure the
     /// schema exists. Use ":memory:" for an ephemeral, test-only store.
+    ///
+    /// Sets a 5s busy_timeout: as of Phase 4.5C, `ctcl-mcp` can open the same
+    /// on-disk file `ctcl-desktop` already has open (two separate OS
+    /// processes, same db). rusqlite's default is 0 - a write that collides
+    /// with another connection's transaction fails immediately with
+    /// SQLITE_BUSY instead of waiting briefly, which is a routine occurrence
+    /// with two live writers and shouldn't surface as a hard error.
     pub fn open(path: &str) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         let store = Store { conn };
         store.init_schema()?;
         Ok(store)

@@ -49,12 +49,19 @@ desktop-first, not a rewrite of the hosted API.
   sleep-wake / manual clock rollback; only anomalies are persisted), and
   `trigger_engine.rs` (Phase 4 — polls due triggers and dispatches their
   action through a pluggable `ActionDispatcher`).
+- `ctcl-mcp/` — Phase 4.5C's **Local MCP server** (binary `ctcl-mcp`): a
+  stdio-transport [Model Context Protocol](https://modelcontextprotocol.io)
+  server (built on the official [`rmcp`](https://crates.io/crates/rmcp) SDK)
+  an Agent Runtime spawns as its own local child process. Opens the same
+  `ctcl-desktop-data.sqlite3` file `ctcl-desktop` uses by default, so an
+  agent sees the live Triggers/WakeEvents the desktop app's background
+  engine actually produces.
 
 ## Develop
 
 ```bash
 cargo build
-cargo test               # 93 tests across ctcl-core + ctcl-store + ctcl-desktop
+cargo test               # 105 tests across ctcl-core + ctcl-store + ctcl-desktop + ctcl-mcp
 cargo run --bin ctcl -- now
 cargo run --bin ctcl -- convert --value 1783420000.5 --from unix_s --to rfc3339 --tz Asia/Taipei
 cargo run --bin ctcl -- serve                       # opens a browser, no terminal needed after this
@@ -253,15 +260,71 @@ next wake — entirely over the Local API, without the desktop UI in the loop.
   once granted, real socket-level as always) — **93 tests total** across the
   workspace, `cargo build --workspace` (full link, not just `check`) clean.
 
-Still to come: Phase 4.5C (Local MCP server, `stdio` transport) and 4.5D
-(Active Delivery — loopback HTTP/local-process push, retry, dead-letter, an
-Agent Endpoint registry) from the Agent Wake whitepaper, and — unrelated,
-still paused per Neo's direction while this took priority — Phase 5 (team
-sync — note this needs an actual sync-backend *product* decision, e.g.
-self-hosted vs. hub on commoninstant.org vs. a new paid tier, not just more
-local Rust code, so it's being left for Neo to weigh in on rather than
-architected unilaterally) and Phase 6 (mobile companion, explicitly last per
-the whitepaper's own ordering).
+**Phase 4.5C (Local MCP server) shipped 2026-07-20**, whitepaper §12 — a new
+`ctcl-mcp` binary crate, a real [Model Context Protocol](https://modelcontextprotocol.io)
+server over `stdio`, built on the official Rust SDK
+([`rmcp`](https://crates.io/crates/rmcp) v2.2.0, `server`+`macros`+`transport-io`
+features) rather than hand-rolling the JSON-RPC framing. Matches §12.1's
+"Local MCP" deployment form and §9.1's local-process trust model: whoever can
+spawn this binary already has local execution rights, so unlike the Local
+API's loopback HTTP surface, tool calls here are **not bearer-token gated** -
+but capability scopes still are, checked on every call through the same
+`require_scope` gate, logged to the *same* `audit_log` table the Local API
+already writes to (`method="MCP"`), so `GET /v1/audit` shows both interfaces'
+calls side by side. §12.3's "讀寫分離" (read/write separation) is honored by
+construction: every write-capable tool lives only here, not on a future
+Remote MCP.
+
+15 tools implemented from the whitepaper's own §12.2 list - `ctcl.now`,
+`convert`, `register_instant`, `get_instant`, `list_systems`, `system_now`,
+`create_system`, `expand_group`, `create_trigger`, `list_triggers`,
+`cancel_trigger`, `list_wake_events`, `ack_wake_event`, `complete_wake_event`,
+`schedule_pulse` (a convenience wrapper over `create_trigger` letting an agent
+self-schedule its next wake `after_seconds` from now, without computing an
+absolute timestamp itself - whitepaper §25's `schedule_next_wake_if_needed`).
+**Deliberately not implemented**: `ctcl.inspect_boundary`,
+`ctcl.resolve_temporal_context`, `ctcl.plan_shared_instant` - these are CTCL
+Web (commoninstant.org, a separate Cloudflare Worker in JS) features with no
+equivalent in `ctcl-core`/`ctcl-store` today; faking them or silently
+omitting them would violate this project's honesty discipline, so the gap is
+declared in the server's own MCP `instructions` string instead. No tool for
+writing a decision receipt exists either, because the whitepaper's own §12.2
+list doesn't name one - an agent posts one over the Local API's Phase 4.5B
+route instead.
+
+Two real engineering points worth naming: (1) **`Store::open` now sets a 5s
+`busy_timeout`** - Phase 4.5C is the first time two separate OS processes
+(`ctcl-desktop` and `ctcl-mcp`) can legitimately have the same SQLite file
+open at once, and rusqlite's default `busy_timeout` of 0 would turn routine
+write contention into a hard `SQLITE_BUSY` error instead of a brief wait; (2)
+tool output intentionally uses `Result<String, String>` (a JSON string as
+text content) rather than `rmcp`'s `Json<T>` structured-output wrapper, which
+would have required adding a `schemars::JsonSchema` derive to every domain
+type in `ctcl-store` (`WakeEvent`, `Trigger`, ...) - an MCP-layer concern
+that has no business leaking into the core persistence crate. The agent
+still gets the exact same data, just as a JSON string rather than a
+schema-typed structured field; that tradeoff is written down here rather
+than silently decided.
+
+12 new tests: 11 direct method-level tests (bypassing the transport, calling
+the tool functions as plain async methods - scope-gating, audit-logging, and
+every tool's underlying behavior) plus **one real end-to-end protocol test**
+that spawns the actual compiled `ctcl-mcp` binary as a child process via
+`rmcp`'s own `TokioChildProcess` client transport, lists tools for real,
+calls `ctcl.now` for real, and confirms a genuinely scope-gated tool is
+genuinely refused - the same "real socket, not mocks" discipline
+`local_api.rs`'s tests already hold this project to, extended to the new
+protocol boundary. **105 tests total** across the workspace, `cargo build
+--workspace` (full link) clean.
+
+Still to come: Phase 4.5D (Active Delivery — loopback HTTP/local-process
+push, retry, dead-letter, an Agent Endpoint registry) from the Agent Wake
+whitepaper, and — unrelated, still paused per Neo's direction while this took
+priority — Phase 5 (team sync — note this needs an actual sync-backend
+*product* decision, e.g. self-hosted vs. hub on commoninstant.org vs. a new
+paid tier, not just more local Rust code, so it's being left for Neo to weigh
+in on rather than architected unilaterally) and Phase 6 (mobile companion,
+explicitly last per the whitepaper's own ordering).
 
 This is intentionally **not** trying to replicate CTCL Web's whole surface at
 once — it starts from the same core math and grows outward, same as the Worker
